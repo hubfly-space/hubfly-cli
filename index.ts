@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 import { Command } from 'commander';
-import { password } from '@inquirer/prompts';
+import { password, select } from '@inquirer/prompts';
 import { getToken, setToken, deleteToken } from './src/store.ts';
-import { fetchWhoAmI, ApiError } from './src/api.ts';
+import { fetchWhoAmI, fetchProjects, fetchProject, ApiError } from './src/api.ts';
 
 const program = new Command();
 
@@ -18,7 +18,7 @@ async function loginFlow(isRetry = false): Promise<void> {
     console.log('\nPlease authenticate to continue.');
   }
   
-  const token = await password({
+  const token = await password({ 
     message: isRetry ? 'Enter your token again:' : 'Enter your API token:',
   });
 
@@ -39,13 +39,13 @@ async function loginFlow(isRetry = false): Promise<void> {
   }
 }
 
-async function ensureAuth(silent = false) {
+async function ensureAuth(silent = false): Promise<string | null> {
   const token = getToken();
   
   if (!token) {
     if (!silent) console.log('No valid session found.');
     await loginFlow();
-    return;
+    return getToken() || null;
   }
 
   try {
@@ -53,11 +53,13 @@ async function ensureAuth(silent = false) {
     if (!silent) {
        console.log(`Logged in as ${user.name} (${user.email})`);
     }
+    return token;
   } catch (error) {
     if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
       if (!silent) console.log('Session expired or invalid.');
       deleteToken();
       await loginFlow(true);
+      return getToken() || null;
     } else {
       if (!silent) console.error('Failed to verify session:', error instanceof Error ? error.message : String(error));
       // Do not delete token on network errors, but exit as we can't proceed
@@ -103,10 +105,56 @@ program
     await ensureAuth();
   });
 
+program
+  .command('projects')
+  .description('List all projects and select one to view details')
+  .action(async () => {
+    const token = await ensureAuth(true);
+    if (!token) return;
+
+    try {
+      const projects = await fetchProjects(token);
+
+      if (projects.length === 0) {
+        console.log('No projects found.');
+        return;
+      }
+
+      const selectedProjectId = await select({
+        message: 'Select a project to view details:',
+        choices: projects.map((p) => ({
+          name: `${p.name} (${p.region.name}) - ${p.status}`,
+          value: p.id,
+          description: `Role: ${p.role} | Created: ${p.createdAt}`,
+        })),
+      });
+
+      console.log(`\nFetching details for project ID: ${selectedProjectId}...`);
+      const details = await fetchProject(token, selectedProjectId);
+
+      if (details.containers.length === 0) {
+        console.log('No containers found in this project.');
+      } else {
+        console.log(`\nContainers in project:\n`);
+        const tableData = details.containers.map(c => ({
+          Name: c.name,
+          Status: c.status,
+          Type: c.source.type,
+          'CPU (Cores)': c.resources.cpu,
+          'RAM (MB)': c.resources.ram,
+          Tier: c.tier
+        }));
+        console.table(tableData);
+      }
+
+    } catch (error) {
+      console.error('Error fetching projects:', error instanceof Error ? error.message : String(error));
+    }
+  });
+
 // Default command handler
 program.action(async () => {
     // If no command is specified, we verify auth as requested
     await ensureAuth();
 });
-
 program.parse(process.argv);
