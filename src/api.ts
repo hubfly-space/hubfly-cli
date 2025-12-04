@@ -1,4 +1,4 @@
-import { API_HOST } from './constants.js';
+import { API_HOST } from "./constants.js";
 
 export interface User {
   id: string;
@@ -86,7 +86,7 @@ export const fetchProjects = async (token: string): Promise<Project[]> => {
     });
 
     if (!response.ok) {
-      throw new ApiError('Failed to fetch projects', response.status);
+      throw new ApiError("Failed to fetch projects", response.status);
     }
 
     const data = await response.json();
@@ -95,20 +95,26 @@ export const fetchProjects = async (token: string): Promise<Project[]> => {
     if (error instanceof ApiError) {
       throw error;
     }
-    throw new Error('Network error or invalid response');
+    throw new Error("Network error or invalid response");
   }
 };
 
-export const fetchProject = async (token: string, projectId: string): Promise<ProjectDetails> => {
+export const fetchProject = async (
+  token: string,
+  projectId: string,
+): Promise<ProjectDetails> => {
   try {
-    const response = await fetch(`${API_HOST}/api/projects/${projectId}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
+    const response = await fetch(
+      `${API_HOST}/api/projects/${projectId}/containers`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       },
-    });
+    );
 
     if (!response.ok) {
-      throw new ApiError('Failed to fetch project details', response.status);
+      throw new ApiError("Failed to fetch project details", response.status);
     }
 
     const data = await response.json();
@@ -117,7 +123,7 @@ export const fetchProject = async (token: string, projectId: string): Promise<Pr
     if (error instanceof ApiError) {
       throw error;
     }
-    throw new Error('Network error or invalid response');
+    throw new Error("Network error or invalid response");
   }
 };
 
@@ -130,7 +136,7 @@ export const fetchWhoAmI = async (token: string): Promise<User> => {
     });
 
     if (!response.ok) {
-      throw new ApiError('Failed to fetch user', response.status);
+      throw new ApiError("Failed to fetch user", response.status);
     }
 
     const data = await response.json();
@@ -140,6 +146,6 @@ export const fetchWhoAmI = async (token: string): Promise<User> => {
       throw error;
     }
     // specific handling for fetch network errors if needed
-    throw new Error('Network error or invalid response');
+    throw new Error("Network error or invalid response");
   }
 };
