@@ -42,6 +42,11 @@ bun start
   bun start whoami
   ```
 
+- **Projects**: List all your projects and interactively select one to view its details, including associated containers.
+  ```bash
+  bun start projects
+  ```
+
 ## Configuration
 
 The API host is configured in `src/constants.ts`. By default, it points to `http://localhost:3000`.
