@@ -1,7 +1,7 @@
 {
   "name": "hubfly-cli",
   "module": "dist/index.js",
-  "version": "0.0.5-beta.0",
+  "version": "0.1.1",
   "type": "module",
   "bin": {
     "hubfly": "dist/index.js"
@@ -13,7 +13,7 @@
     "start": "bun index.ts",
     "typecheck": "tsc",
     "build": "bun build ./index.ts --outfile=dist/index.js --minify --target=bun",
-    "publish": "bun run build && bun pm publish"
+    "push": "bun run build && bun publish"
   },
   "devDependencies": {
     "@inquirer/prompts": "^8.0.2",

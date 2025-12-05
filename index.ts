@@ -30,7 +30,9 @@ async function loginFlow(isRetry = false): Promise<void> {
       "\nAuthentication failed. Please check your token and try again.",
     );
   } else {
-    console.log("\nPlease authenticate to continue.");
+    console.log(
+      "\nPlease authenticate to continue. go to https://hubfly.space/cli/auth to get the token",
+    );
   }
 
   const token = await password({
