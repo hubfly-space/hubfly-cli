@@ -117,12 +117,15 @@ export async function runTunnelConnection(
 ): Promise<void> {
   console.log(`\nEstablishing tunnel...`);
 
+  const sshUser = tunnel.sshUser.trim();
+  const sshHost = tunnel.sshHost.trim();
+
   console.log(
     `Local: localhost:${localPort} -> Remote: ${tunnel.targetNetwork.ipAddress}:${targetPort}`,
   );
   console.log(`Run command manually if this fails:`);
   console.log(
-    `ssh -i ${privateKeyPath} -p ${tunnel.sshPort} ${tunnel.sshUser}@${tunnel.sshHost} -L ${localPort}:${tunnel.targetNetwork.ipAddress}:${targetPort} -N`,
+    `ssh -i ${privateKeyPath} -p ${tunnel.sshPort} ${sshUser}@${sshHost} -L ${localPort}:${tunnel.targetNetwork.ipAddress}:${targetPort} -N`,
   );
 
   const maxRetries = 3;
@@ -148,7 +151,9 @@ export async function runTunnelConnection(
           "StrictHostKeyChecking=no",
           "-o",
           "UserKnownHostsFile=/dev/null",
-          `${tunnel.sshUser}@${tunnel.sshHost}`,
+          "-o",
+          "ExitOnForwardFailure=yes",
+          `${sshUser}@${sshHost}`,
           "-L",
           `${localPort}:${tunnel.targetNetwork.ipAddress}:${targetPort}`,
           "-N",
@@ -161,13 +166,14 @@ export async function runTunnelConnection(
       });
     });
 
+    // If exitCode is 0 (success/clean exit) or 130 (SIGINT/Ctrl+C usually), we break.
     if (exitCode === 0 || exitCode === 130) {
       console.log(`Tunnel connection closed (code ${exitCode})`);
       break;
     }
-
+    
     if (attempt === maxRetries + 1) {
-      console.log(`Tunnel connection closed (code ${exitCode})`);
+       console.log(`Tunnel connection closed (code ${exitCode})`);
     }
   }
 }
