@@ -3,13 +3,11 @@
   "workspaces": {
     "": {
       "name": "hubfly-cli",
-      "dependencies": {
+      "devDependencies": {
         "@inquirer/prompts": "^8.0.2",
+        "@types/bun": "latest",
         "commander": "^14.0.2",
         "conf": "^15.0.2",
-      },
-      "devDependencies": {
-        "@types/bun": "latest",
       },
       "peerDependencies": {
         "typescript": "^5",

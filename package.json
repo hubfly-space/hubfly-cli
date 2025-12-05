@@ -1,24 +1,27 @@
 {
   "name": "hubfly-cli",
-  "module": "index.ts",
+  "module": "dist/index.js",
   "version": "0.0.5-beta.0",
   "type": "module",
   "bin": {
-    "hubfly": "index.ts"
+    "hubfly": "dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "start": "bun index.ts",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "build": "bun build ./index.ts --outfile=dist/index.js --minify --target=bun",
+    "publish": "bun run build && bun pm publish"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@inquirer/prompts": "^8.0.2",
+    "@types/bun": "latest",
+    "commander": "^14.0.2",
+    "conf": "^15.0.2"
   },
   "peerDependencies": {
     "typescript": "^5"
-  },
-  "dependencies": {
-    "@inquirer/prompts": "^8.0.2",
-    "commander": "^14.0.2",
-    "conf": "^15.0.2"
   }
 }
