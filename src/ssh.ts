@@ -109,7 +109,7 @@ export async function generateKeyPairAndSave(
   });
 }
 
-export function runTunnelConnection(
+export async function runTunnelConnection(
   tunnel: Tunnel,
   privateKeyPath: string,
   localPort: number,
@@ -125,31 +125,66 @@ export function runTunnelConnection(
     `ssh -i ${privateKeyPath} -p ${tunnel.sshPort} ${tunnel.sshUser}@${tunnel.sshHost} -L ${localPort}:${tunnel.targetNetwork.ipAddress}:${targetPort} -N`,
   );
 
-  return new Promise((resolve) => {
-    const ssh = spawn(
-      "ssh",
-      [
-        "-i",
-        privateKeyPath,
-        "-p",
-        tunnel.sshPort.toString(),
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        `${tunnel.sshUser}@${tunnel.sshHost}`,
-        "-L",
-        `${localPort}:${tunnel.targetNetwork.ipAddress}:${targetPort}`,
-        "-N",
-      ],
-      { stdio: "inherit" },
-    );
+  const maxRetries = 3;
+  const retryDelay = 2000;
 
-    ssh.on("close", (code) => {
-      console.log(`Tunnel connection closed (code ${code})`);
-      resolve();
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    if (attempt > 1) {
+      console.log(
+        `\nConnection failed. Retrying in ${retryDelay / 1000}s... (Attempt ${attempt}/${maxRetries + 1})`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, retryDelay));
+    }
+
+    const exitCode = await new Promise<number>((resolve) => {
+      const ssh = spawn(
+        "ssh",
+        [
+          "-i",
+          privateKeyPath,
+          "-p",
+          tunnel.sshPort.toString(),
+          "-o",
+          "StrictHostKeyChecking=no",
+          "-o",
+          "UserKnownHostsFile=/dev/null",
+          `${tunnel.sshUser}@${tunnel.sshHost}`,
+          "-L",
+          `${localPort}:${tunnel.targetNetwork.ipAddress}:${targetPort}`,
+          "-N",
+        ],
+        { stdio: "inherit" },
+      );
+
+      ssh.on("close", (code) => {
+        resolve(code ?? 1);
+      });
     });
-  });
+
+    // If exit code is 0, it meant it closed cleanly (likely user intervention), so we probably shouldn't retry?
+    // Or if it connected successfully and then closed?
+    // ssh -N blocks until connection is closed.
+    // If it exits immediately with non-zero, it failed.
+    // If the user hits Ctrl+C, it will exit. We probably shouldn't retry on Ctrl+C.
+    // But detecting Ctrl+C specifically via exit code depends on the signal.
+    // Usually we can assume if the user killed it, they don't want a retry.
+    // But we can't easily distinguish user kill vs network drop unless we handle signals or check duration.
+    // For now, let's assume if it exits, we retry unless it was 0?
+    // Actually, if it runs for a long time then disconnects, do we retry?
+    // The user request is about "fails while tunnel havent botted up", which is immediate failure.
+    // So maybe we only retry if it fails *quickly*?
+    // For simplicity, sticking to the requested "add retries 3" logic.
+
+    // If exitCode is 0 (success/clean exit) or 130 (SIGINT/Ctrl+C usually), we break.
+    if (exitCode === 0 || exitCode === 130) {
+      console.log(`Tunnel connection closed (code ${exitCode})`);
+      break;
+    }
+    
+    if (attempt === maxRetries + 1) {
+       console.log(`Tunnel connection closed (code ${exitCode})`);
+    }
+  }
 }
 
 export async function renameKeyFiles(
