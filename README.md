@@ -57,6 +57,16 @@ bun start
   3. **Create Tunnel**: Generates a secure key pair and opens an ephemeral entry point to your container.
   4. **Connect**: Selects a local port (e.g., localhost:8080) to forward to the remote container port (e.g., 80).
 
+- **Quick Tunnel**: Connect to a container in a single command.
+  ```bash
+  bun start tunnel <containerIdOrName> <localPort>
+  ```
+  *Example:* `bun start tunnel my-database 5432`
+  - Automatically searches for the container.
+  - Reuses existing active tunnels and keys if available.
+  - Creates new keys and a new tunnel if none exist.
+  - Establishes the SSH connection immediately.
+
 ## Configuration
 
 The API host is configured in `src/constants.ts`. By default, it points to `http://localhost:3000`.

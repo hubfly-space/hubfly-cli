@@ -315,11 +315,171 @@ async function manageContainer(
       });
 
       if (localPort) {
-        await runTunnelConnection(tunnel, keyPath, localPort);
+        await runTunnelConnection(
+          tunnel,
+          keyPath,
+          localPort,
+          tunnel.targetPort,
+        );
       }
     }
   }
 }
+
+program
+  .command("tunnel")
+  .description("Quickly tunnel to a container (creates new if needed)")
+  .argument("<containerIdOrName>", "Container ID or Name")
+  .argument("<localPort>", "Local port to forward to")
+  .argument("<targetPort>", "Local port to forward to")
+  .action(async (containerIdOrName, localPortStr, targetPortStr) => {
+    const localPort = parseInt(localPortStr, 10);
+    const targetPort = parseInt(targetPortStr, 10);
+
+    if (isNaN(localPort) || isNaN(targetPort)) {
+      console.error("Invalid port number.");
+      process.exit(1);
+    }
+
+    const token = await ensureAuth(true);
+    if (!token) return;
+
+    try {
+      // 1. Find the container
+      console.log(`Searching for container '${containerIdOrName}'...`);
+      const projects = await fetchProjects(token);
+
+      let targetContainer: Container | null = null;
+      let targetProjectId: string | null = null;
+
+      // Parallel search could be faster but let's go sequential or blocked for simplicity/errors
+      // We need project ID to create tunnel later
+      for (const p of projects) {
+        try {
+          const details = await fetchProject(token, p.id);
+          const found = details.containers.find(
+            (c) => c.id === containerIdOrName || c.name === containerIdOrName,
+          );
+          if (found) {
+            targetContainer = found;
+            targetProjectId = p.id;
+            break;
+          }
+        } catch (e) {
+          // ignore error for specific project fetch
+        }
+      }
+
+      if (!targetContainer || !targetProjectId) {
+        console.error(
+          `Container '${containerIdOrName}' not found in any project.`,
+        );
+        return;
+      }
+
+      console.log(
+        `Found container: ${targetContainer.name} (${targetContainer.id})`,
+      );
+
+      // 2. Check for existing active tunnels & keys
+      console.log("Checking for existing tunnels...");
+      const tunnels = await fetchTunnels(token, targetProjectId);
+      // Filter for this container and ensure keys exist
+      const activeTunnels = tunnels.filter(
+        (t) => t.targetContainerId === targetContainer!.id,
+      );
+
+      let tunnelToUse: Tunnel | null = null;
+      let keyPathToUse: string | null = null;
+
+      const { existsSync } = await import("node:fs");
+
+      for (const t of activeTunnels) {
+        // Check if key exists
+        const keyPath = join(
+          homedir(),
+          ".hubfly",
+          "keys",
+          `tunnel-${t.tunnelId}`,
+        );
+        if (existsSync(keyPath)) {
+          // Check expiry?
+          if (new Date(t.expiresAt) > new Date()) {
+            tunnelToUse = t;
+            keyPathToUse = keyPath;
+            break;
+          }
+        }
+      }
+
+      if (tunnelToUse && keyPathToUse) {
+        console.log(`Found existing active tunnel: ${tunnelToUse.tunnelId}`);
+        // If local port requested is different from tunnel target port, warn?
+        // Actually runTunnelConnection takes localPort argument, so we can map anything to the tunnel's target port.
+        // But the tunnel itself is fixed to a specific target port on the container.
+        // Wait, the tunnel object has `targetPort`.
+        // If the user wants to tunnel to port 80, but the existing tunnel is for port 3000, we can't reuse it?
+        // Good catch. The existing tunnel is bound to a specific target port.
+
+        // We should check if existing tunnel target port matches what user might want?
+        // But the user only provided ONE port "localPort".
+        // Assumption: User wants localPort -> targetPort (same).
+        // Or we should assume the user wants to connect to the tunnel's defined target port?
+        // If I say "tunnel my-web 8080", I expect local 8080 -> container 8080.
+        // If existing tunnel is container 3000, I can't use it.
+
+        if (tunnelToUse.targetPort !== localPort) {
+          console.log(
+            `Existing tunnel found but targets port ${tunnelToUse.targetPort}, not ${localPort}. Creating new one...`,
+          );
+          tunnelToUse = null; // force create
+        }
+      }
+
+      // 3. Create if needed
+      if (!tunnelToUse) {
+        console.log(
+          "No suitable existing tunnel found. Creating new tunnel...",
+        );
+        console.log("Generating SSH keys...");
+        const tempId = `temp-${Date.now()}`;
+        const { publicKey } = await generateKeyPairAndSave(tempId);
+
+        console.log(`Creating tunnel for port ${localPort}...`);
+        const newTunnel = await createTunnel(token, {
+          projectId: targetProjectId,
+          targetContainer: targetContainer.name,
+          containerId: targetContainer.id,
+          targetPort: localPort, // Assuming target port = local port requested
+          publicKey,
+        });
+
+        console.log("Tunnel created successfully! Renaming keys...");
+        const newKeyPath = await renameKeyFiles(
+          tempId,
+          `tunnel-${newTunnel.tunnelId}`,
+        );
+        tunnelToUse = newTunnel;
+        keyPathToUse = newKeyPath;
+      }
+
+      // 4. Connect
+      if (tunnelToUse && keyPathToUse) {
+        await runTunnelConnection(
+          tunnelToUse,
+          keyPathToUse,
+          localPort,
+          targetPort,
+        );
+      }
+    } catch (error) {
+      console.error(
+        "Error in tunnel command:",
+        error instanceof Error ? error.message : String(error),
+      );
+      process.exit(1);
+    }
+  });
 
 // Default command handler
 program.action(async () => {

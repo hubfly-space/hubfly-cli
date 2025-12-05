@@ -113,14 +113,16 @@ export function runTunnelConnection(
   tunnel: Tunnel,
   privateKeyPath: string,
   localPort: number,
+  targetPort: number,
 ): Promise<void> {
   console.log(`\nEstablishing tunnel...`);
+
   console.log(
-    `Local: localhost:${localPort} -> Remote: ${tunnel.targetNetwork.ipAddress}:${tunnel.targetPort}`,
+    `Local: localhost:${localPort} -> Remote: ${tunnel.targetNetwork.ipAddress}:${targetPort}`,
   );
   console.log(`Run command manually if this fails:`);
   console.log(
-    `ssh -i ${privateKeyPath} -p ${tunnel.sshPort} ${tunnel.sshUser}@${tunnel.sshHost} -L ${localPort}:${tunnel.targetNetwork.ipAddress}:${tunnel.targetPort} -N`,
+    `ssh -i ${privateKeyPath} -p ${tunnel.sshPort} ${tunnel.sshUser}@${tunnel.sshHost} -L ${localPort}:${tunnel.targetNetwork.ipAddress}:${targetPort} -N`,
   );
 
   return new Promise((resolve) => {
@@ -137,7 +139,7 @@ export function runTunnelConnection(
         "UserKnownHostsFile=/dev/null",
         `${tunnel.sshUser}@${tunnel.sshHost}`,
         "-L",
-        `${localPort}:${tunnel.targetNetwork.ipAddress}:${tunnel.targetPort}`,
+        `${localPort}:${tunnel.targetNetwork.ipAddress}:${targetPort}`,
         "-N",
       ],
       { stdio: "inherit" },
