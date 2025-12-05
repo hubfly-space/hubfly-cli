@@ -77,7 +77,7 @@ export interface ProjectDetails {
   containers: Container[];
 }
 
-export interface Tunnel {
+export type Tunnel = Readonly<{
   tunnelId: string;
   dockerName: string;
   id: string;
@@ -87,12 +87,12 @@ export interface Tunnel {
   targetContainer: string;
   targetPort: number;
   targetContainerId: string;
-  targetNetwork: {
+  targetNetwork: Readonly<{
     ipAddress: string;
-  };
+  }>;
   createdAt: string;
   expiresAt: string;
-}
+}>;
 
 export const fetchProjects = async (token: string): Promise<Project[]> => {
   try {

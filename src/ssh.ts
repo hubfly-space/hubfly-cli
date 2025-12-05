@@ -3,7 +3,7 @@ import { writeFile, mkdir, chmod } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { Tunnel } from "./api.js";
+import { type Tunnel } from "./api.js";
 
 const KEYS_DIR = join(homedir(), ".hubfly", "keys");
 
@@ -137,7 +137,7 @@ export function runTunnelConnection(
         "UserKnownHostsFile=/dev/null",
         `${tunnel.sshUser}@${tunnel.sshHost}`,
         "-L",
-        `${localPort}:${tunnel.targetContainer}:${tunnel.targetPort}`,
+        `${localPort}:${tunnel.targetNetwork.ipAddress}:${tunnel.targetPort}`,
         "-N",
       ],
       { stdio: "inherit" },

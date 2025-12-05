@@ -1,7 +1,7 @@
 {
   "name": "hubfly-cli",
   "module": "index.ts",
-  "version": "0.0.4-beta.0",
+  "version": "0.0.5-beta.0",
   "type": "module",
   "bin": {
     "hubfly": "index.ts"
