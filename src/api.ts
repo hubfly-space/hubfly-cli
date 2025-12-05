@@ -77,6 +77,23 @@ export interface ProjectDetails {
   containers: Container[];
 }
 
+export interface Tunnel {
+  tunnelId: string;
+  dockerName: string;
+  id: string;
+  sshHost: string;
+  sshPort: number;
+  sshUser: string;
+  targetContainer: string;
+  targetPort: number;
+  targetContainerId: string;
+  targetNetwork: {
+    ipAddress: string;
+  };
+  createdAt: string;
+  expiresAt: string;
+}
+
 export const fetchProjects = async (token: string): Promise<Project[]> => {
   try {
     const response = await fetch(`${API_HOST}/api/projects`, {
@@ -91,6 +108,68 @@ export const fetchProjects = async (token: string): Promise<Project[]> => {
 
     const data = await response.json();
     return (data as { projects: Project[] }).projects;
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+    throw new Error("Network error or invalid response");
+  }
+};
+
+export const fetchTunnels = async (
+  token: string,
+  projectId: string,
+): Promise<Tunnel[]> => {
+  try {
+    const response = await fetch(
+      `${API_HOST}/api/projects/${projectId}/tunnels`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      throw new ApiError("Failed to fetch tunnels", response.status);
+    }
+
+    const data = await response.json();
+
+    return data as Tunnel[];
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+    throw new Error("Network error or invalid response");
+  }
+};
+
+export const createTunnel = async (
+  token: string,
+  data: {
+    projectId: string;
+    targetContainer: string;
+    targetPort: number;
+    containerId: string;
+    publicKey: string;
+  },
+): Promise<Tunnel> => {
+  try {
+    const response = await fetch(`${API_HOST}/api/tunnels`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(data),
+    });
+
+    if (!response.ok) {
+      throw new ApiError("Failed to create tunnel", response.status);
+    }
+
+    return (await response.json()) as Tunnel;
   } catch (error) {
     if (error instanceof ApiError) {
       throw error;
