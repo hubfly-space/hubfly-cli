@@ -147,12 +147,6 @@ export async function runTunnelConnection(
           privateKeyPath,
           "-p",
           tunnel.sshPort.toString(),
-          "-o",
-          "StrictHostKeyChecking=no",
-          "-o",
-          "UserKnownHostsFile=/dev/null",
-          "-o",
-          "ExitOnForwardFailure=yes",
           `${sshUser}@${sshHost}`,
           "-L",
           `${localPort}:${tunnel.targetNetwork.ipAddress}:${targetPort}`,
@@ -171,9 +165,9 @@ export async function runTunnelConnection(
       console.log(`Tunnel connection closed (code ${exitCode})`);
       break;
     }
-    
+
     if (attempt === maxRetries + 1) {
-       console.log(`Tunnel connection closed (code ${exitCode})`);
+      console.log(`Tunnel connection closed (code ${exitCode})`);
     }
   }
 }
