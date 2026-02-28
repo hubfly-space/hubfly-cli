@@ -11,8 +11,9 @@ Node/Bun code was removed; no JavaScript runtime is required.
 ## Features
 
 - Token-based authentication (`login`, `logout`, `whoami`)
-- Interactive project/container flow (`projects`)
+- Screen-based interactive project/container flow (`projects`)
 - Fast tunnel command (`tunnel <containerIdOrName> <localPort> <targetPort>`)
+- Single-tunnel and multi-tunnel interactive connection from the container screen
 - SSH key management in `~/.hubfly/keys`
 - Local token storage in `~/.hubfly/config.json`
 - Tunnel service API via `service` command (`/health`, `/start`, `/stop`, `/status`)
@@ -54,6 +55,22 @@ go run . help
 - `./hubfly whoami`
 - `./hubfly projects`
 - `./hubfly tunnel <containerIdOrName> <localPort> <targetPort>`
+
+### Interactive `projects` flow
+
+`projects` uses isolated terminal screens for each step:
+- Projects screen: choose project by number, partial name, or project ID
+- Project screen: inspect containers and open container management
+- Container screen: create tunnel, connect one tunnel, or connect multiple tunnels
+
+#### Multi-tunnel connect
+
+Inside container management:
+1. Choose `Connect Multiple Tunnels`
+2. Select tunnels by comma-separated numbers or tunnel IDs (or `all`)
+3. Choose local-port behavior (defaults or custom per tunnel)
+4. CLI starts all selected SSH tunnels concurrently
+5. Stop all by pressing `Enter` or `Ctrl+C`
 
 Examples:
 
