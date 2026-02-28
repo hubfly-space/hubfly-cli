@@ -30,7 +30,7 @@ Node/Bun code was removed; no JavaScript runtime is required.
 ### Build from source
 
 ```bash
-git clone https://github.com/<your-org>/hubfly-cli.git
+git clone https://github.com/hubfly-space/hubfly-cli.git
 cd hubfly-cli
 go build -o hubfly .
 ```
