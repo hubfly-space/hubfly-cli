@@ -102,13 +102,24 @@ func startTunnelConnectionBackground(t tunnel, privateKeyPath string, localPort,
 
 func tunnelCommand(t tunnel, privateKeyPath string, localPort, targetPort int) *exec.Cmd {
 	forwardHost := resolveTunnelForwardHost(t)
-	debugf("tunnel route: tunnel=%s forward_host=%s local_port=%d target_port=%d", t.TunnelID, forwardHost, localPort, targetPort)
+	knownHosts := filepath.Join(hubflyDir(), "known_hosts")
+	_ = os.MkdirAll(hubflyDir(), 0o700)
+	if f, err := os.OpenFile(knownHosts, os.O_CREATE, 0o600); err == nil {
+		_ = f.Close()
+	}
+	hostAlias := fmt.Sprintf("hubfly-%s", strings.TrimSpace(t.TunnelID))
+
+	debugf("tunnel route: tunnel=%s forward_host=%s local_port=%d target_port=%d host_alias=%s", t.TunnelID, forwardHost, localPort, targetPort, hostAlias)
 	return exec.Command("ssh",
 		"-i", privateKeyPath,
 		"-o", "ExitOnForwardFailure=yes",
 		"-o", "ConnectTimeout=10",
 		"-o", "ServerAliveInterval=30",
 		"-o", "ServerAliveCountMax=3",
+		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "UserKnownHostsFile="+knownHosts,
+		"-o", "HostKeyAlias="+hostAlias,
 		"-p", strconv.Itoa(t.SSHPort),
 		fmt.Sprintf("%s@%s", strings.TrimSpace(t.SSHUser), strings.TrimSpace(t.SSHHost)),
 		"-L", fmt.Sprintf("%d:%s:%d", localPort, forwardHost, targetPort),
