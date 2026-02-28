@@ -54,6 +54,12 @@ func run(args []string) error {
 			return errors.New("invalid target port")
 		}
 		return tunnelFlow(args[1], localPort, targetPort)
+	case "version", "--version", "-v":
+		showVersion()
+		return nil
+	case "update":
+		checkOnly := len(args) > 1 && args[1] == "--check"
+		return updateFlow(checkOnly)
 	case "help", "--help", "-h":
 		printUsage()
 		return nil
@@ -71,6 +77,8 @@ func printUsage() {
 	fmt.Println("  hubfly [--debug] whoami")
 	fmt.Println("  hubfly [--debug] projects")
 	fmt.Println("  hubfly [--debug] tunnel <containerIdOrName> <localPort> <targetPort>")
+	fmt.Println("  hubfly [--debug] version")
+	fmt.Println("  hubfly [--debug] update [--check]")
 	fmt.Println("  hubfly service [--port <port>]")
 	fmt.Println("")
 	fmt.Println("Debug mode:")
