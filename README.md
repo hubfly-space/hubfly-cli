@@ -67,9 +67,9 @@ Multi-tunnel selection:
 
 `hubfly update` downloads the latest release for your OS/arch and replaces the local binary (Linux/macOS).
 
-## Debug mode
+## Debug and logs
 
-Enable with either:
+Enable debug:
 
 ```bash
 hubfly --debug projects
@@ -77,7 +77,27 @@ hubfly --debug projects
 HUBFLY_DEBUG=1 hubfly projects
 ```
 
-Logs include HTTP method/URL, masked auth header, request body, response status/body, and transport errors.
+When debug mode is enabled:
+- Non-TUI commands print debug lines to stderr.
+- During TUI mode (`projects`), debug lines are written to:
+  - `~/.hubfly/logs/debug.log`
+
+Debug output includes:
+- HTTP method/URL
+- masked Authorization token
+- request/response payloads
+- tunnel route selection details
+
+## SSH tunnel behavior
+
+For tunnel connections, the CLI now uses a Hubfly-managed known_hosts file to avoid interactive host-key failures:
+
+- `UserKnownHostsFile=~/.hubfly/known_hosts`
+- `HostKeyAlias=hubfly-<tunnelId>`
+- `StrictHostKeyChecking=accept-new`
+- `BatchMode=yes`
+
+This prevents global `~/.ssh/known_hosts` conflicts and avoids prompt-based failures in TUI sessions.
 
 ## Tunnel service mode
 
@@ -117,6 +137,8 @@ Each release asset also has a `.sha256` checksum file.
 
 - Token: `~/.hubfly/config.json`
 - Keys: `~/.hubfly/keys`
+- Known hosts (Hubfly-managed): `~/.hubfly/known_hosts`
+- Debug logs: `~/.hubfly/logs/debug.log`
 
 ## Development
 
