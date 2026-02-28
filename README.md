@@ -146,7 +146,3 @@ Each release asset also has a `.sha256` checksum file.
 go build ./...
 go test ./...
 ```
-
-## License
-
-Add your preferred license in `LICENSE` (MIT/Apache-2.0/etc.).
