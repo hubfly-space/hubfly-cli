@@ -2,182 +2,121 @@
 
 Open-source Hubfly CLI written in Go.
 
-This repository contains one Go codebase that includes:
-- End-user Hubfly CLI
-- Local tunnel-service HTTP server
+Repo: https://github.com/hubfly-space/hubfly-cli
 
-Node/Bun code was removed; no JavaScript runtime is required.
+## Quick install
+
+Linux/macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hubfly-space/hubfly-cli/main/install.sh | bash
+```
+
+Then verify:
+
+```bash
+hubfly version
+```
 
 ## Features
 
-- Token-based authentication (`login`, `logout`, `whoami`)
-- Bubble Tea powered persistent TUI state machine for project/container/tunnel navigation (`projects`)
-- Fast tunnel command (`tunnel <containerIdOrName> <localPort> <targetPort>`)
-- Single-tunnel and multi-tunnel interactive connection from container view
-- SSH key management in `~/.hubfly/keys`
-- Local token storage in `~/.hubfly/config.json`
-- Tunnel service API via `service` command (`/health`, `/start`, `/stop`, `/status`)
-- Debug mode for API troubleshooting (`--debug` or `HUBFLY_DEBUG=1`)
+- Token-based auth (`login`, `logout`, `whoami`)
+- Persistent Bubble Tea TUI for project/container/tunnel workflow (`projects`)
+- Single and multiple tunnel connect flows
+- Local tunnel status screens while sessions are active
+- Debug mode for API requests/responses (`--debug` or `HUBFLY_DEBUG=1`)
+- Built-in version and self-update commands
+- Tunnel service mode (`service`)
 
-## Requirements
-
-- Go `1.24+`
-- `ssh`
-- `ssh-keygen`
-
-## Install / Build
-
-### Build from source
+## Commands
 
 ```bash
-git clone https://github.com/hubfly-space/hubfly-cli.git
-cd hubfly-cli
-go build -o hubfly .
+hubfly login [--token <TOKEN>]
+hubfly logout
+hubfly whoami
+hubfly projects
+hubfly tunnel <containerIdOrName> <localPort> <targetPort>
+hubfly version
+hubfly update --check
+hubfly update
+hubfly service [--port <port>]
 ```
 
-### Run without building
+## TUI Controls (`hubfly projects`)
 
-```bash
-go run . help
-```
-
-## CLI Usage
-
-```bash
-./hubfly help
-```
-
-### Commands
-
-- `./hubfly login`
-- `./hubfly login --token <TOKEN>`
-- `./hubfly logout`
-- `./hubfly whoami`
-- `./hubfly projects`
-- `./hubfly tunnel <containerIdOrName> <localPort> <targetPort>`
-
-## TUI Workflow (`projects`)
-
-Run:
-
-```bash
-./hubfly projects
-```
-
-### Keyboard controls
-
-Single-select screens (projects/containers/tunnels/actions):
 - `↑/↓` or `j/k`: move
-- `enter`: select
-- `q` or `esc`: cancel/back
-- Type text: filter list
+- `enter`: select/confirm
+- `esc`: back
+- `q`: quit from top-level
+- Type text in filterable lists to search
 
-Multi-select tunnel screen:
-- `↑/↓` or `j/k`: move
-- `space`: toggle item
+Multi-tunnel selection:
+- `space`: toggle tunnel
 - `a`: toggle all
-- `enter`: confirm selection
-- `q` or `esc`: cancel
+- `enter`: continue
 
-### Flow
+## Versioning and updates
 
-1. Pick a project from a searchable list.
-2. Inspect container resources and status.
-3. Choose action:
-   - Create New Tunnel
-   - Connect One Tunnel
-   - Connect Multiple Tunnels
-4. For single tunnel connect, the TUI shows an active session screen with the exact local endpoint (`localhost:<port>`).
-5. For multi-tunnel connect, choose tunnels in TUI, then pick target-port mode or custom local ports.
-6. Launch selected tunnels concurrently in the same session.
-7. Stop active tunnel sessions with `s`, `Enter`, `Esc`, or `Ctrl+C`.
+`hubfly version` shows:
+- version tag
+- commit SHA
+- build date
+- OS/arch
 
-Examples:
+`hubfly update --check` checks latest release.
 
-```bash
-./hubfly login --token hf_xxxxxxxxx
-./hubfly projects
-./hubfly tunnel my-api 8080 80
-```
+`hubfly update` downloads the latest release for your OS/arch and replaces the local binary (Linux/macOS).
 
-## Debug Mode
+## Debug mode
 
-Use debug mode to print API request/response details for troubleshooting.
-
-### Enable per command
+Enable with either:
 
 ```bash
-./hubfly --debug whoami
-./hubfly --debug projects
-./hubfly --debug tunnel my-api 8080 80
+hubfly --debug projects
+# or
+HUBFLY_DEBUG=1 hubfly projects
 ```
 
-### Enable via environment variable
+Logs include HTTP method/URL, masked auth header, request body, response status/body, and transport errors.
+
+## Tunnel service mode
 
 ```bash
-HUBFLY_DEBUG=1 ./hubfly projects
+hubfly service
+hubfly service --port 5600
 ```
 
-### What debug mode logs
-
-- HTTP method + URL
-- Authorization header (token is masked)
-- Request JSON body
-- Response status code
-- Response body
-- Network/transport errors
-
-## Tunnel Service Mode
-
-Run the service:
-
-```bash
-./hubfly service
-./hubfly service --port 5600
-```
-
-### Endpoints
-
+Endpoints:
 - `GET /health`
 - `POST /start`
 - `POST /stop`
 - `GET /status`
 
-### Start tunnel request example
+## Build from source
 
 ```bash
-curl -X POST http://localhost:5600/start \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "my-web-tunnel",
-    "ssh_host": "1.2.3.4",
-    "ssh_port": 22,
-    "ssh_user": "root",
-    "private_key": "-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----",
-    "local_port": 8080,
-    "remote_host": "127.0.0.1",
-    "remote_port": 80
-  }'
+git clone https://github.com/hubfly-space/hubfly-cli.git
+cd hubfly-cli
+go build -o hubfly .
+./hubfly version
 ```
 
-### Stop tunnel request example
+## Release automation
 
-```bash
-curl -X POST http://localhost:5600/stop \
-  -H "Content-Type: application/json" \
-  -d '{"id":"my-web-tunnel"}'
-```
+GitHub Actions workflow builds and publishes release assets on tag push (`v*`):
+- `hubfly_linux_amd64.tar.gz`
+- `hubfly_linux_arm64.tar.gz`
+- `hubfly_darwin_amd64.tar.gz`
+- `hubfly_darwin_arm64.tar.gz`
+- `hubfly_windows_amd64.zip`
+- `hubfly_windows_arm64.zip`
 
-### Status example
+Each release asset also has a `.sha256` checksum file.
 
-```bash
-curl http://localhost:5600/status
-```
-
-## Storage Paths
+## Storage paths
 
 - Token: `~/.hubfly/config.json`
-- SSH private/public keys: `~/.hubfly/keys`
+- Keys: `~/.hubfly/keys`
 
 ## Development
 
@@ -186,11 +125,6 @@ go build ./...
 go test ./...
 ```
 
-## Security Notes
-
-- Debug mode prints full request/response payloads. Use with care in shared logs.
-- SSH private keys are generated locally and stored on your machine.
-
 ## License
 
-Add your preferred open-source license in `LICENSE` (for example MIT or Apache-2.0).
+Add your preferred license in `LICENSE` (MIT/Apache-2.0/etc.).
