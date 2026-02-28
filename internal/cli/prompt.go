@@ -56,3 +56,27 @@ func promptNumberWithDefault(label string, defaultValue int) (int, error) {
 		return value, nil
 	}
 }
+
+func promptYesNo(label string, defaultYes bool) (bool, error) {
+	hint := "y/N"
+	if defaultYes {
+		hint = "Y/n"
+	}
+	for {
+		text, err := prompt(fmt.Sprintf("%s (%s): ", label, hint))
+		if err != nil {
+			return false, err
+		}
+		text = strings.ToLower(strings.TrimSpace(text))
+		if text == "" {
+			return defaultYes, nil
+		}
+		if text == "y" || text == "yes" {
+			return true, nil
+		}
+		if text == "n" || text == "no" {
+			return false, nil
+		}
+		fmt.Println("Please answer yes or no.")
+	}
+}

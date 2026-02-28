@@ -65,13 +65,7 @@ func runTunnelConnection(t tunnel, privateKeyPath string, localPort, targetPort 
 			time.Sleep(retryDelay)
 		}
 
-		cmd := exec.Command("ssh",
-			"-i", privateKeyPath,
-			"-p", strconv.Itoa(t.SSHPort),
-			fmt.Sprintf("%s@%s", strings.TrimSpace(t.SSHUser), strings.TrimSpace(t.SSHHost)),
-			"-L", fmt.Sprintf("%d:%s:%d", localPort, t.TargetNetwork.IPAddress, targetPort),
-			"-N",
-		)
+		cmd := tunnelCommand(t, privateKeyPath, localPort, targetPort)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Stdin = os.Stdin
@@ -93,4 +87,24 @@ func runTunnelConnection(t tunnel, privateKeyPath string, localPort, targetPort 
 		}
 	}
 	return nil
+}
+
+func startTunnelConnectionBackground(t tunnel, privateKeyPath string, localPort, targetPort int) (*exec.Cmd, error) {
+	cmd := tunnelCommand(t, privateKeyPath, localPort, targetPort)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmd, nil
+}
+
+func tunnelCommand(t tunnel, privateKeyPath string, localPort, targetPort int) *exec.Cmd {
+	return exec.Command("ssh",
+		"-i", privateKeyPath,
+		"-p", strconv.Itoa(t.SSHPort),
+		fmt.Sprintf("%s@%s", strings.TrimSpace(t.SSHUser), strings.TrimSpace(t.SSHHost)),
+		"-L", fmt.Sprintf("%d:%s:%d", localPort, t.TargetNetwork.IPAddress, targetPort),
+		"-N",
+	)
 }
