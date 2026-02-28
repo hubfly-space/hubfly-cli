@@ -1,89 +1,48 @@
-# hubfly-cli
+# hubfly-cli (Go)
 
-A CLI tool for interacting with the Hubfly API.
+Unified Go project containing:
+- Hubfly CLI (`login`, `logout`, `whoami`, `projects`, `tunnel`)
+- Tunnel service API (`service` command)
 
-## Features
+## Requirements
 
-- **Authentication**: Securely log in with your API token.
-- **Token Management**: Automatically stores your token for future sessions and handles re-authentication if the token expires.
-- **User Info**: Quickly view the currently authenticated user profile.
-- **Project Management**: View project details and resource usage.
-- **Container Tunnels**: Securely access private containers via ephemeral SSH tunnels using local port forwarding.
+- Go 1.23+
+- OpenSSH tools available in PATH: `ssh`, `ssh-keygen`
 
-## Installation
-
-1.  Clone the repository.
-2.  Install dependencies:
+## Build
 
 ```bash
-bun install
+go build -o hubfly .
 ```
 
-### Requirements
-- **OpenSSH Client**: The CLI uses the system's `ssh` and `ssh-keygen` commands. Ensure these are available in your PATH (standard on Linux and macOS).
-
-## Usage
-
-To start the CLI and trigger the default authentication flow:
+## CLI Usage
 
 ```bash
-bun start
+./hubfly login
+./hubfly logout
+./hubfly whoami
+./hubfly projects
+./hubfly tunnel <containerIdOrName> <localPort> <targetPort>
 ```
 
-### Commands
+Generated keys are stored in `~/.hubfly/keys`.
+Token is stored in `~/.hubfly/config.json`.
 
-- **Login**: Force a login or switch accounts.
-  ```bash
-  bun start login
-  ```
+## Tunnel Service Usage
 
-- **Logout**: Remove the stored authentication token.
-  ```bash
-  bun start logout
-  ```
-
-- **Who Am I**: Check the currently logged-in user details.
-  ```bash
-  bun start whoami
-  ```
-
-- **Projects & Tunnels**: List all your projects, view details, and manage container tunnels.
-  ```bash
-  bun start projects
-  ```
-  *Follow the interactive prompts to:*
-  1. Select a Project.
-  2. Choose "Manage Container (Tunnels)".
-  3. **Create Tunnel**: Generates a secure key pair and opens an ephemeral entry point to your container.
-  4. **Connect**: Selects a local port (e.g., localhost:8080) to forward to the remote container port (e.g., 80).
-
-- **Quick Tunnel**: Connect to a container in a single command.
-  ```bash
-  bun start tunnel <containerIdOrName> <localPort>
-  ```
-  *Example:* `bun start tunnel my-database 5432`
-  - Automatically searches for the container.
-  - Reuses existing active tunnels and keys if available.
-  - Creates new keys and a new tunnel if none exist.
-  - Establishes the SSH connection immediately.
-
-## Configuration
-
-The API host is configured in `src/constants.ts`. By default, it points to `http://localhost:3000`.
-
-```typescript
-export const API_HOST = "http://localhost:3000";
+```bash
+./hubfly service
+# or custom port
+./hubfly service --port 5600
 ```
 
-## Key Storage
+Service endpoints:
+- `GET /health`
+- `POST /start`
+- `POST /stop`
+- `GET /status`
 
-Generated SSH keys for tunnels are stored securely in `~/.hubfly/keys`. 
-- **Public keys** are uploaded to the ephemeral tunnel container.
-- **Private keys** remain on your local machine with restricted permissions (`600`).
+## Notes
 
-## Development
-
-This project uses [Bun](https://bun.com) as the runtime and package manager.
-
-- **Run locally**: `bun run index.ts` or `bun start`
-- **Typecheck**: `bun run typecheck`
+- No Node/Bun runtime is required anymore.
+- Existing tunnel-service behavior is preserved under the Go `service` subcommand.
