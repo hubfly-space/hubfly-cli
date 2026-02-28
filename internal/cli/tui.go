@@ -66,7 +66,7 @@ func tuiPickOne(title, subtitle string, options []listOption) (int, bool, error)
 	}
 
 	m := menuModel{list: l}
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	result, err := p.Run()
 	if err != nil {
 		return 0, false, err
@@ -195,7 +195,7 @@ func tuiPickMany(title, subtitle string, options []listOption) ([]int, bool, err
 	}
 
 	m := newMultiModel(title, subtitle, options)
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	result, err := p.Run()
 	if err != nil {
 		return nil, false, err
