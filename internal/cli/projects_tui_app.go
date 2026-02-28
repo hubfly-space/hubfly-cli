@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -135,6 +136,8 @@ type projectsApp struct {
 }
 
 func runProjectsTUI(token string) error {
+	setTUIDebugMode(true)
+	defer setTUIDebugMode(false)
 	m := newProjectsApp(token)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
@@ -498,7 +501,20 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !ok {
 					return m, nil
 				}
-				m.selectedTunnel = m.tunnels[item.idx]
+				candidate := m.tunnels[item.idx]
+				if tunnelIsExpired(candidate.ExpiresAt) {
+					m.errMsg = "Selected tunnel is expired. Create a new tunnel first."
+					m.status = "Tunnel expired"
+					return m, nil
+				}
+				keyPath := filepath.Join(keysDir(), "tunnel-"+candidate.TunnelID)
+				if _, err := os.Stat(keyPath); err != nil {
+					m.errMsg = fmt.Sprintf("Local key not found for tunnel %s. Recreate tunnel from this machine.", candidate.TunnelID)
+					m.status = "Missing local key"
+					debugf("tunnel key missing: %s", keyPath)
+					return m, nil
+				}
+				m.selectedTunnel = candidate
 				m.setPortInput(portInputSingle, "Local forward port", m.selectedTunnel.TargetPort)
 				return m, nil
 			}
@@ -742,9 +758,14 @@ func (m *projectsApp) setContainerActionItems() {
 func (m *projectsApp) setTunnelSingleItems() {
 	items := make([]list.Item, 0, len(m.tunnels))
 	for i, t := range m.tunnels {
+		keyPath := filepath.Join(keysDir(), "tunnel-"+t.TunnelID)
+		keyState := "key:ok"
+		if _, err := os.Stat(keyPath); err != nil {
+			keyState = "key:missing"
+		}
 		items = append(items, appItem{
 			title: t.TunnelID,
-			desc:  fmt.Sprintf("%s:%d -> %s:%d | %s", t.SSHHost, t.SSHPort, t.TargetNetwork.IPAddress, t.TargetPort, tunnelState(t.ExpiresAt)),
+			desc:  fmt.Sprintf("%s:%d -> %s:%d | %s | %s", t.SSHHost, t.SSHPort, t.TargetNetwork.IPAddress, t.TargetPort, tunnelState(t.ExpiresAt), keyState),
 			idx:   i,
 		})
 	}
@@ -859,10 +880,17 @@ func createTunnelWithKey(token, projectID string, c container, targetPort int) e
 
 func startSingleTunnelCmd(t tunnel, keyPath string, localPort, targetPort int) tea.Cmd {
 	return func() tea.Msg {
+		if tunnelIsExpired(t.ExpiresAt) {
+			return singleStartMsg{err: fmt.Errorf("tunnel %s is expired", t.TunnelID)}
+		}
+		if _, err := os.Stat(keyPath); err != nil {
+			return singleStartMsg{err: fmt.Errorf("local key not found for tunnel %s", t.TunnelID)}
+		}
 		cmd, err := startTunnelConnectionBackground(t, keyPath, localPort, targetPort)
 		if err != nil {
 			return singleStartMsg{err: err}
 		}
+		debugf("started tunnel %s localhost:%d -> %s:%d", t.TunnelID, localPort, t.TargetNetwork.IPAddress, targetPort)
 		return singleStartMsg{cmd: cmd, localPort: localPort}
 	}
 }
@@ -878,6 +906,19 @@ func startMultiTunnelsCmd(plans []multiTunnelPlan) tea.Cmd {
 		cmds := make([]*exec.Cmd, 0, len(plans))
 		events := make(chan multiEvent, len(plans)*2)
 		for idx, plan := range plans {
+			if tunnelIsExpired(plan.tunnel.ExpiresAt) {
+				for _, started := range cmds {
+					_ = stopSSHProcess(started)
+				}
+				return multiStartMsg{err: fmt.Errorf("tunnel %s is expired", plan.tunnel.TunnelID)}
+			}
+			if _, err := os.Stat(plan.keyPath); err != nil {
+				for _, started := range cmds {
+					_ = stopSSHProcess(started)
+				}
+				return multiStartMsg{err: fmt.Errorf("missing local key for tunnel %s", plan.tunnel.TunnelID)}
+			}
+
 			cmd, err := startTunnelConnectionBackground(plan.tunnel, plan.keyPath, plan.localPort, plan.tunnel.TargetPort)
 			if err != nil {
 				for _, started := range cmds {
@@ -899,6 +940,14 @@ func waitMultiEventCmd(events chan multiEvent) tea.Cmd {
 		ev := <-events
 		return multiEventMsg{event: ev}
 	}
+}
+
+func tunnelIsExpired(expiresAt string) bool {
+	when, err := time.Parse(time.RFC3339, expiresAt)
+	if err != nil {
+		return false
+	}
+	return when.Before(time.Now())
 }
 
 func filterContainerTunnels(tunnels []tunnel, containerID string) []tunnel {

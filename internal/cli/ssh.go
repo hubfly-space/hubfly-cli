@@ -102,6 +102,8 @@ func startTunnelConnectionBackground(t tunnel, privateKeyPath string, localPort,
 func tunnelCommand(t tunnel, privateKeyPath string, localPort, targetPort int) *exec.Cmd {
 	return exec.Command("ssh",
 		"-i", privateKeyPath,
+		"-o", "ExitOnForwardFailure=yes",
+		"-o", "ConnectTimeout=10",
 		"-p", strconv.Itoa(t.SSHPort),
 		fmt.Sprintf("%s@%s", strings.TrimSpace(t.SSHUser), strings.TrimSpace(t.SSHHost)),
 		"-L", fmt.Sprintf("%d:%s:%d", localPort, t.TargetNetwork.IPAddress, targetPort),
