@@ -17,30 +17,7 @@ func projectsFlow() error {
 	if err != nil {
 		return err
 	}
-
-	for {
-		projects, fetchErr := fetchProjects(token)
-		if fetchErr != nil {
-			return fetchErr
-		}
-		if len(projects) == 0 {
-			fmt.Println("No projects found.")
-			waitForEnter("")
-			return nil
-		}
-
-		project, cancelled, selectErr := selectProject(projects)
-		if selectErr != nil {
-			return selectErr
-		}
-		if cancelled {
-			return nil
-		}
-
-		if err := manageProject(token, project); err != nil {
-			return err
-		}
-	}
+	return runProjectsTUI(token)
 }
 
 func manageProject(token string, p project) error {
