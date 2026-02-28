@@ -40,6 +40,8 @@ type project struct {
 	Status    string `json:"status"`
 	Role      string `json:"role"`
 	CreatedAt string `json:"createdAt"`
+	Spent     string `json:"spentAmount"`
+	Monthly   string `json:"monthlyCost"`
 	Region    region `json:"region"`
 }
 
@@ -53,13 +55,23 @@ type container struct {
 	Tier    string `json:"tier"`
 	Status  string `json:"status"`
 	Created string `json:"createdAt"`
+	Updated string `json:"updatedAt"`
 	Source  struct {
 		Type string `json:"type"`
 	} `json:"source"`
 	Resources struct {
-		CPU int `json:"cpu"`
-		RAM int `json:"ram"`
+		CPU     float64 `json:"cpu"`
+		RAM     float64 `json:"ram"`
+		Storage float64 `json:"storage"`
 	} `json:"resources"`
+	Networking struct {
+		Ports []struct {
+			Protocol  string `json:"protocol"`
+			Container int    `json:"container"`
+			TunnelURL string `json:"tunnelUrl"`
+		} `json:"ports"`
+	} `json:"networking"`
+	PrimaryNetworkAlias string `json:"primaryNetworkAlias"`
 }
 
 type projectDetails struct {
