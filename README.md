@@ -87,9 +87,10 @@ Multi-select tunnel screen:
    - Create New Tunnel
    - Connect One Tunnel
    - Connect Multiple Tunnels
-4. For multi-tunnel connect, choose tunnels in TUI, then pick target-port mode or custom local ports.
-5. Launch all selected tunnels concurrently in the same session.
-6. Stop all active multi-tunnel sessions with `s`, `Enter`, `Esc`, or `Ctrl+C`.
+4. For single tunnel connect, the TUI shows an active session screen with the exact local endpoint (`localhost:<port>`).
+5. For multi-tunnel connect, choose tunnels in TUI, then pick target-port mode or custom local ports.
+6. Launch selected tunnels concurrently in the same session.
+7. Stop active tunnel sessions with `s`, `Enter`, `Esc`, or `Ctrl+C`.
 
 Examples:
 
