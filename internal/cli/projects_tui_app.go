@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -69,13 +70,15 @@ type tunnelCreatedMsg struct {
 }
 
 type singleSSHDoneMsg struct {
-	err error
+	err    error
+	detail string
 }
 
 type singleStartMsg struct {
 	cmd       *exec.Cmd
 	localPort int
 	err       error
+	stderrBuf *bytes.Buffer
 }
 
 type multiTunnelPlan struct {
@@ -114,16 +117,17 @@ type projectsApp struct {
 	tunnels           []tunnel
 	selectedTunnel    tunnel
 
-	multiSelectedIdxs map[int]bool
-	singleRunningCmd  *exec.Cmd
-	singleRunningPort int
-	multiCustomList   []tunnel
-	multiCustomPorts  []int
-	multiCustomIndex  int
-	multiRunningCmds  []*exec.Cmd
-	multiRunningPlans []multiTunnelPlan
-	multiRunningState []string
-	multiEvents       chan multiEvent
+	multiSelectedIdxs  map[int]bool
+	singleRunningCmd   *exec.Cmd
+	singleRunningPort  int
+	singleRunningState string
+	multiCustomList    []tunnel
+	multiCustomPorts   []int
+	multiCustomIndex   int
+	multiRunningCmds   []*exec.Cmd
+	multiRunningPlans  []multiTunnelPlan
+	multiRunningState  []string
+	multiEvents        chan multiEvent
 
 	portMode        portInputMode
 	portInputPrompt string
@@ -246,22 +250,32 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errMsg = ""
 		m.singleRunningCmd = msg.cmd
 		m.singleRunningPort = msg.localPort
+		m.singleRunningState = "running"
 		m.view = viewRunningSingle
 		m.status = fmt.Sprintf("Tunnel open: localhost:%d -> %s:%d", msg.localPort, resolveTunnelForwardHost(m.selectedTunnel), m.selectedTunnel.TargetPort)
-		return m, waitSingleTunnelDoneCmd(msg.cmd)
+		return m, waitSingleTunnelDoneCmd(msg.cmd, msg.stderrBuf)
 	case singleSSHDoneMsg:
-		if msg.err != nil {
-			m.errMsg = msg.err.Error()
-			m.status = "Tunnel session ended with error"
-		} else {
-			m.errMsg = ""
-			m.status = "Tunnel session closed"
+		if m.singleRunningCmd == nil && m.view != viewRunningSingle {
+			return m, nil
 		}
 		m.singleRunningCmd = nil
-		m.singleRunningPort = 0
-		m.view = viewContainerMenu
-		m.setContainerActionItems()
-		return m, fetchTunnelsCmd(m.token, m.selectedProject.ID)
+		if msg.err != nil {
+			detail := strings.TrimSpace(msg.detail)
+			if detail != "" {
+				m.errMsg = fmt.Sprintf("%v | %s", msg.err, detail)
+			} else {
+				m.errMsg = msg.err.Error()
+			}
+			m.status = "Tunnel failed to stay open"
+			m.singleRunningState = "error"
+			m.view = viewRunningSingle
+			return m, nil
+		}
+		m.errMsg = ""
+		m.status = "Tunnel session closed"
+		m.singleRunningState = "closed"
+		m.view = viewRunningSingle
+		return m, nil
 	case multiStartMsg:
 		if msg.err != nil {
 			m.errMsg = msg.err.Error()
@@ -608,11 +622,16 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.singleRunningCmd != nil {
 					_ = stopSSHProcess(m.singleRunningCmd)
 					m.singleRunningCmd = nil
+					m.singleRunningState = "closed"
+					m.singleRunningPort = 0
+					m.view = viewContainerMenu
+					m.setContainerActionItems()
+					m.status = "Stopped tunnel session"
+					return m, fetchTunnelsCmd(m.token, m.selectedProject.ID)
 				}
 				m.singleRunningPort = 0
 				m.view = viewContainerMenu
 				m.setContainerActionItems()
-				m.status = "Stopped tunnel session"
 				return m, fetchTunnelsCmd(m.token, m.selectedProject.ID)
 			}
 		case viewRunningMulti:
@@ -672,7 +691,12 @@ func (m projectsApp) View() string {
 			m.selectedTunnel.TargetPort,
 		))
 		b.WriteString("\nUse this endpoint locally now.\n")
-		b.WriteString("Press 's' (or Enter/Esc) to stop and return.\n")
+		if m.singleRunningState == "error" {
+			b.WriteString("Tunnel ended unexpectedly. Check error details above.\n")
+			b.WriteString("Press Enter/Esc to return.\n")
+		} else {
+			b.WriteString("Press 's' (or Enter/Esc) to stop and return.\n")
+		}
 		return b.String()
 	}
 
@@ -886,18 +910,28 @@ func startSingleTunnelCmd(t tunnel, keyPath string, localPort, targetPort int) t
 		if _, err := os.Stat(keyPath); err != nil {
 			return singleStartMsg{err: fmt.Errorf("local key not found for tunnel %s", t.TunnelID)}
 		}
-		cmd, err := startTunnelConnectionBackground(t, keyPath, localPort, targetPort)
-		if err != nil {
+
+		stderrBuf := &bytes.Buffer{}
+		cmd := tunnelCommand(t, keyPath, localPort, targetPort)
+		cmd.Stdout = stderrBuf
+		cmd.Stderr = stderrBuf
+		if err := cmd.Start(); err != nil {
 			return singleStartMsg{err: err}
 		}
-		debugf("started tunnel %s localhost:%d -> %s:%d", t.TunnelID, localPort, t.TargetNetwork.IPAddress, targetPort)
-		return singleStartMsg{cmd: cmd, localPort: localPort}
+
+		debugf("started tunnel %s localhost:%d -> %s:%d", t.TunnelID, localPort, resolveTunnelForwardHost(t), targetPort)
+		return singleStartMsg{cmd: cmd, localPort: localPort, stderrBuf: stderrBuf}
 	}
 }
 
-func waitSingleTunnelDoneCmd(cmd *exec.Cmd) tea.Cmd {
+func waitSingleTunnelDoneCmd(cmd *exec.Cmd, stderrBuf *bytes.Buffer) tea.Cmd {
 	return func() tea.Msg {
-		return singleSSHDoneMsg{err: cmd.Wait()}
+		err := cmd.Wait()
+		detail := ""
+		if stderrBuf != nil {
+			detail = strings.TrimSpace(stderrBuf.String())
+		}
+		return singleSSHDoneMsg{err: err, detail: detail}
 	}
 }
 
