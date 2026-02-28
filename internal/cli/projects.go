@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -24,14 +23,12 @@ func projectsFlow() error {
 		if fetchErr != nil {
 			return fetchErr
 		}
-		renderScreen("Projects", "Select a project to inspect containers and tunnels")
 		if len(projects) == 0 {
 			fmt.Println("No projects found.")
 			waitForEnter("")
 			return nil
 		}
 
-		printProjectsTable(projects)
 		project, cancelled, selectErr := selectProject(projects)
 		if selectErr != nil {
 			return selectErr
@@ -62,16 +59,20 @@ func manageProject(token string, p project) error {
 			printContainersTable(details.Containers)
 		}
 
-		fmt.Println("\nActions")
-		fmt.Println("1) Manage Container (Tunnels)")
-		fmt.Println("2) Refresh")
-		fmt.Println("3) Back")
-		action, err := promptNumber("Choose action: ", 3)
+		action, cancelled, err := pickAction("Project Actions", "Use arrows and Enter", []listOption{
+			{Title: "Manage Container (Tunnels)", Desc: "Select a container and manage its tunnels"},
+			{Title: "Refresh", Desc: "Reload project details"},
+			{Title: "Back", Desc: "Return to projects list"},
+		})
 		if err != nil {
 			return err
 		}
+		if cancelled {
+			return nil
+		}
+
 		switch action {
-		case 1:
+		case 0:
 			if len(details.Containers) == 0 {
 				waitForEnter("No containers available. Press Enter to continue...")
 				continue
@@ -86,7 +87,7 @@ func manageProject(token string, p project) error {
 			if err := manageContainer(token, p.ID, c); err != nil {
 				return err
 			}
-		case 2:
+		case 1:
 			continue
 		default:
 			return nil
@@ -122,19 +123,22 @@ func manageContainer(token, projectID string, c container) error {
 			fmt.Println("No active tunnels found for this container.")
 		}
 
-		fmt.Println("\nActions")
-		fmt.Println("1) Create New Tunnel")
-		fmt.Println("2) Connect One Tunnel")
-		fmt.Println("3) Connect Multiple Tunnels")
-		fmt.Println("4) Refresh")
-		fmt.Println("5) Back")
-		action, err := promptNumber("Choose action: ", 5)
+		action, cancelled, err := pickAction("Container Actions", "Use arrows and Enter", []listOption{
+			{Title: "Create New Tunnel", Desc: "Generate key and create a tunnel for this container"},
+			{Title: "Connect One Tunnel", Desc: "Open a single SSH tunnel"},
+			{Title: "Connect Multiple Tunnels", Desc: "Run several SSH tunnels at the same time"},
+			{Title: "Refresh", Desc: "Reload container and tunnel state"},
+			{Title: "Back", Desc: "Return to project view"},
+		})
 		if err != nil {
 			return err
 		}
+		if cancelled {
+			return nil
+		}
 
 		switch action {
-		case 1:
+		case 0:
 			port, pErr := promptNumberWithDefault("Enter internal container port", 80)
 			if pErr != nil {
 				return pErr
@@ -147,7 +151,7 @@ func manageContainer(token, projectID string, c container) error {
 				continue
 			}
 			waitForEnter("Tunnel created successfully. Press Enter to continue...")
-		case 2:
+		case 1:
 			if len(myTunnels) == 0 {
 				waitForEnter("No tunnels available. Press Enter to continue...")
 				continue
@@ -171,7 +175,7 @@ func manageContainer(token, projectID string, c container) error {
 			if err := runTunnelConnection(selected, keyPath, local, selected.TargetPort); err != nil {
 				waitForEnter(fmt.Sprintf("Tunnel connection failed: %v\nPress Enter to continue...", err))
 			}
-		case 3:
+		case 2:
 			if len(myTunnels) == 0 {
 				waitForEnter("No tunnels available. Press Enter to continue...")
 				continue
@@ -179,7 +183,7 @@ func manageContainer(token, projectID string, c container) error {
 			if err := connectMultipleTunnels(myTunnels); err != nil {
 				waitForEnter(fmt.Sprintf("Multi tunnel connect failed: %v\nPress Enter to continue...", err))
 			}
-		case 4:
+		case 3:
 			continue
 		default:
 			return nil
@@ -188,11 +192,6 @@ func manageContainer(token, projectID string, c container) error {
 }
 
 func connectMultipleTunnels(tunnels []tunnel) error {
-	renderScreen("Multi Tunnel Connect", "Select tunnels to run concurrently")
-	printTunnelsTable(tunnels)
-	fmt.Println("Selection: comma-separated numbers or tunnel IDs (example: 1,3,t_abc).")
-	fmt.Println("Type 'all' to select all tunnels, or 0 to cancel.")
-
 	selected, cancelled, err := selectMultipleTunnels(tunnels)
 	if err != nil {
 		return err
@@ -473,143 +472,90 @@ func tunnelState(expiresAt string) string {
 	return "active"
 }
 
+func pickAction(title, subtitle string, options []listOption) (int, bool, error) {
+	return tuiPickOne(title, subtitle, options)
+}
+
 func selectProject(projects []project) (project, bool, error) {
-	for {
-		raw, err := prompt("Select project (number/name/id, 0 to cancel): ")
-		if err != nil {
-			return project{}, false, err
-		}
-		if raw == "0" {
-			return project{}, true, nil
-		}
-		if idx, convErr := strconv.Atoi(raw); convErr == nil {
-			if idx >= 1 && idx <= len(projects) {
-				return projects[idx-1], false, nil
-			}
-			fmt.Println("Invalid project number.")
-			continue
-		}
-		needle := strings.TrimSpace(strings.ToLower(raw))
-		for _, p := range projects {
-			if strings.EqualFold(p.ID, raw) || strings.EqualFold(p.Name, raw) || strings.Contains(strings.ToLower(p.Name), needle) {
-				return p, false, nil
-			}
-		}
-		fmt.Println("Project not found. Enter a valid number, name, or id.")
+	options := make([]listOption, 0, len(projects))
+	for _, p := range projects {
+		options = append(options, listOption{
+			Title: fmt.Sprintf("%s (%s)", p.Name, p.ID),
+			Desc:  fmt.Sprintf("Region: %s | Status: %s | Role: %s | Spent: %s", p.Region.Name, p.Status, p.Role, valueOrDash(p.Spent)),
+		})
 	}
+	idx, cancelled, err := tuiPickOne("Projects", "Type to filter, Enter to select, q to cancel", options)
+	if err != nil {
+		return project{}, false, err
+	}
+	if cancelled {
+		return project{}, true, nil
+	}
+	return projects[idx], false, nil
 }
 
 func selectContainer(containers []container) (container, bool, error) {
-	for {
-		raw, err := prompt("Select container (number/name/id, 0 to cancel): ")
-		if err != nil {
-			return container{}, false, err
-		}
-		if raw == "0" {
-			return container{}, true, nil
-		}
-		if idx, convErr := strconv.Atoi(raw); convErr == nil {
-			if idx >= 1 && idx <= len(containers) {
-				return containers[idx-1], false, nil
-			}
-			fmt.Println("Invalid container number.")
-			continue
-		}
-		needle := strings.TrimSpace(strings.ToLower(raw))
-		for _, c := range containers {
-			if strings.EqualFold(c.ID, raw) || strings.EqualFold(c.Name, raw) || strings.Contains(strings.ToLower(c.Name), needle) {
-				return c, false, nil
-			}
-		}
-		fmt.Println("Container not found. Enter a valid number, name, or id.")
+	options := make([]listOption, 0, len(containers))
+	for _, c := range containers {
+		options = append(options, listOption{
+			Title: fmt.Sprintf("%s (%s)", c.Name, c.ID),
+			Desc:  fmt.Sprintf("Status: %s | CPU: %.2f | RAM: %.0fMB | Ports: %d", c.Status, c.Resources.CPU, c.Resources.RAM, len(c.Networking.Ports)),
+		})
 	}
+	idx, cancelled, err := tuiPickOne("Containers", "Type to filter, Enter to select, q to cancel", options)
+	if err != nil {
+		return container{}, false, err
+	}
+	if cancelled {
+		return container{}, true, nil
+	}
+	return containers[idx], false, nil
 }
 
 func selectTunnel(tunnels []tunnel) (tunnel, bool, error) {
-	for {
-		raw, err := prompt("Select tunnel (number/tunnel id, 0 to cancel): ")
-		if err != nil {
-			return tunnel{}, false, err
-		}
-		if raw == "0" {
-			return tunnel{}, true, nil
-		}
-		if idx, convErr := strconv.Atoi(raw); convErr == nil {
-			if idx >= 1 && idx <= len(tunnels) {
-				return tunnels[idx-1], false, nil
-			}
-			fmt.Println("Invalid tunnel number.")
-			continue
-		}
-		for _, t := range tunnels {
-			if strings.EqualFold(t.TunnelID, raw) {
-				return t, false, nil
-			}
-		}
-		fmt.Println("Tunnel not found. Enter a valid number or tunnel id.")
+	options := make([]listOption, 0, len(tunnels))
+	for _, t := range tunnels {
+		options = append(options, listOption{
+			Title: fmt.Sprintf("%s", t.TunnelID),
+			Desc:  fmt.Sprintf("SSH: %s:%d | Target: %s:%d | State: %s", t.SSHHost, t.SSHPort, t.TargetNetwork.IPAddress, t.TargetPort, tunnelState(t.ExpiresAt)),
+		})
 	}
+	idx, cancelled, err := tuiPickOne("Tunnels", "Type to filter, Enter to select, q to cancel", options)
+	if err != nil {
+		return tunnel{}, false, err
+	}
+	if cancelled {
+		return tunnel{}, true, nil
+	}
+	return tunnels[idx], false, nil
 }
 
 func selectMultipleTunnels(tunnels []tunnel) ([]tunnel, bool, error) {
-	for {
-		raw, err := prompt("Select tunnels: ")
-		if err != nil {
-			return nil, false, err
-		}
-		raw = strings.TrimSpace(raw)
-		if raw == "0" {
-			return nil, true, nil
-		}
-		if strings.EqualFold(raw, "all") {
-			return tunnels, false, nil
-		}
-
-		parts := strings.Split(raw, ",")
-		selected := make([]tunnel, 0, len(parts))
-		seen := map[string]bool{}
-		valid := true
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			if part == "" {
-				continue
-			}
-			if idx, convErr := strconv.Atoi(part); convErr == nil {
-				if idx < 1 || idx > len(tunnels) {
-					fmt.Printf("Invalid tunnel number: %s\n", part)
-					valid = false
-					break
-				}
-				t := tunnels[idx-1]
-				if !seen[t.TunnelID] {
-					selected = append(selected, t)
-					seen[t.TunnelID] = true
-				}
-				continue
-			}
-
-			matched := false
-			for _, t := range tunnels {
-				if strings.EqualFold(t.TunnelID, part) {
-					if !seen[t.TunnelID] {
-						selected = append(selected, t)
-						seen[t.TunnelID] = true
-					}
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				fmt.Printf("Unknown tunnel: %s\n", part)
-				valid = false
-				break
-			}
-		}
-
-		if valid && len(selected) > 0 {
-			return selected, false, nil
-		}
-		fmt.Println("Please select at least one valid tunnel.")
+	options := make([]listOption, 0, len(tunnels))
+	for _, t := range tunnels {
+		options = append(options, listOption{
+			Title: fmt.Sprintf("%s", t.TunnelID),
+			Desc:  fmt.Sprintf("%s:%d -> %s:%d", t.SSHHost, t.SSHPort, t.TargetNetwork.IPAddress, t.TargetPort),
+		})
 	}
+	indices, cancelled, err := tuiPickMany("Multi Tunnel Selection", "Space to toggle, Enter to confirm, q to cancel", options)
+	if err != nil {
+		return nil, false, err
+	}
+	if cancelled {
+		return nil, true, nil
+	}
+
+	selected := make([]tunnel, 0, len(indices))
+	for _, idx := range indices {
+		if idx >= 0 && idx < len(tunnels) {
+			selected = append(selected, tunnels[idx])
+		}
+	}
+	if len(selected) == 0 {
+		return nil, true, nil
+	}
+	return selected, false, nil
 }
 
 func valueOrDash(v string) string {
