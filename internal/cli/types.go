@@ -87,8 +87,11 @@ type tunnel struct {
 	TargetPort        int    `json:"targetPort"`
 	TargetContainer   string `json:"targetContainer"`
 	TargetContainerID string `json:"targetContainerId"`
+	DockerName        string `json:"dockerName"`
+	Instructions      string `json:"instructions"`
 	TargetNetwork     struct {
-		IPAddress string `json:"ipAddress"`
+		IPAddress string   `json:"ipAddress"`
+		Aliases   []string `json:"aliases"`
 	} `json:"targetNetwork"`
 	ExpiresAt string `json:"expiresAt"`
 }

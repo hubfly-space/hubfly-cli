@@ -247,7 +247,7 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.singleRunningCmd = msg.cmd
 		m.singleRunningPort = msg.localPort
 		m.view = viewRunningSingle
-		m.status = fmt.Sprintf("Tunnel open: localhost:%d -> %s:%d", msg.localPort, m.selectedTunnel.TargetNetwork.IPAddress, m.selectedTunnel.TargetPort)
+		m.status = fmt.Sprintf("Tunnel open: localhost:%d -> %s:%d", msg.localPort, resolveTunnelForwardHost(m.selectedTunnel), m.selectedTunnel.TargetPort)
 		return m, waitSingleTunnelDoneCmd(msg.cmd)
 	case singleSSHDoneMsg:
 		if msg.err != nil {
@@ -668,7 +668,7 @@ func (m projectsApp) View() string {
 		b.WriteString(fmt.Sprintf("- %s | localhost:%d -> %s:%d\n",
 			m.selectedTunnel.TunnelID,
 			m.singleRunningPort,
-			m.selectedTunnel.TargetNetwork.IPAddress,
+			resolveTunnelForwardHost(m.selectedTunnel),
 			m.selectedTunnel.TargetPort,
 		))
 		b.WriteString("\nUse this endpoint locally now.\n")
@@ -688,7 +688,7 @@ func (m projectsApp) View() string {
 			b.WriteString(fmt.Sprintf("- %s | localhost:%d -> %s:%d | %s\n",
 				plan.tunnel.TunnelID,
 				plan.localPort,
-				plan.tunnel.TargetNetwork.IPAddress,
+				resolveTunnelForwardHost(plan.tunnel),
 				plan.tunnel.TargetPort,
 				state,
 			))
