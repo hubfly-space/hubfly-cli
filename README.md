@@ -2,18 +2,18 @@
 
 Open-source Hubfly CLI written in Go.
 
-This repository now contains one Go codebase that includes:
-- The end-user Hubfly CLI
-- The local tunnel-service HTTP server
+This repository contains one Go codebase that includes:
+- End-user Hubfly CLI
+- Local tunnel-service HTTP server
 
 Node/Bun code was removed; no JavaScript runtime is required.
 
 ## Features
 
 - Token-based authentication (`login`, `logout`, `whoami`)
-- Screen-based interactive project/container flow (`projects`)
+- Bubble Tea powered TUI for project/container/tunnel navigation (`projects`)
 - Fast tunnel command (`tunnel <containerIdOrName> <localPort> <targetPort>`)
-- Single-tunnel and multi-tunnel interactive connection from the container screen
+- Single-tunnel and multi-tunnel interactive connection from container view
 - SSH key management in `~/.hubfly/keys`
 - Local token storage in `~/.hubfly/config.json`
 - Tunnel service API via `service` command (`/health`, `/start`, `/stop`, `/status`)
@@ -21,7 +21,7 @@ Node/Bun code was removed; no JavaScript runtime is required.
 
 ## Requirements
 
-- Go `1.23+`
+- Go `1.24+`
 - `ssh`
 - `ssh-keygen`
 
@@ -56,27 +56,44 @@ go run . help
 - `./hubfly projects`
 - `./hubfly tunnel <containerIdOrName> <localPort> <targetPort>`
 
-### Interactive `projects` flow
+## TUI Workflow (`projects`)
 
-`projects` uses isolated terminal screens for each step:
-- Projects screen: choose project by number, partial name, or project ID
-- Project screen: inspect containers and open container management
-- Container screen: create tunnel, connect one tunnel, or connect multiple tunnels
+Run:
 
-#### Multi-tunnel connect
+```bash
+./hubfly projects
+```
 
-Inside container management:
-1. Choose `Connect Multiple Tunnels`
-2. Select tunnels by comma-separated numbers or tunnel IDs (or `all`)
-3. Choose local-port behavior (defaults or custom per tunnel)
-4. CLI starts all selected SSH tunnels concurrently
-5. Stop all by pressing `Enter` or `Ctrl+C`
+### Keyboard controls
+
+Single-select screens (projects/containers/tunnels/actions):
+- `↑/↓` or `j/k`: move
+- `enter`: select
+- `q` or `esc`: cancel/back
+- Type text: filter list
+
+Multi-select tunnel screen:
+- `↑/↓` or `j/k`: move
+- `space`: toggle item
+- `a`: toggle all
+- `enter`: confirm selection
+- `q` or `esc`: cancel
+
+### Flow
+
+1. Pick a project from a searchable list.
+2. Inspect container resources and status.
+3. Choose action:
+   - Create New Tunnel
+   - Connect One Tunnel
+   - Connect Multiple Tunnels
+4. For multi-tunnel connect, choose tunnels in TUI and launch all concurrently.
+5. Stop all active multi-tunnel sessions with `Enter` or `Ctrl+C`.
 
 Examples:
 
 ```bash
 ./hubfly login --token hf_xxxxxxxxx
-./hubfly whoami
 ./hubfly projects
 ./hubfly tunnel my-api 8080 80
 ```
