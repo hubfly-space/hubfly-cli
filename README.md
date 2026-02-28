@@ -11,7 +11,7 @@ Node/Bun code was removed; no JavaScript runtime is required.
 ## Features
 
 - Token-based authentication (`login`, `logout`, `whoami`)
-- Bubble Tea powered TUI for project/container/tunnel navigation (`projects`)
+- Bubble Tea powered persistent TUI state machine for project/container/tunnel navigation (`projects`)
 - Fast tunnel command (`tunnel <containerIdOrName> <localPort> <targetPort>`)
 - Single-tunnel and multi-tunnel interactive connection from container view
 - SSH key management in `~/.hubfly/keys`
@@ -87,8 +87,9 @@ Multi-select tunnel screen:
    - Create New Tunnel
    - Connect One Tunnel
    - Connect Multiple Tunnels
-4. For multi-tunnel connect, choose tunnels in TUI and launch all concurrently.
-5. Stop all active multi-tunnel sessions with `Enter` or `Ctrl+C`.
+4. For multi-tunnel connect, choose tunnels in TUI, then pick target-port mode or custom local ports.
+5. Launch all selected tunnels concurrently in the same session.
+6. Stop all active multi-tunnel sessions with `s`, `Enter`, `Esc`, or `Ctrl+C`.
 
 Examples:
 
