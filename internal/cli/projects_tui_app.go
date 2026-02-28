@@ -25,6 +25,7 @@ const (
 	viewTunnelsMulti
 	viewMultiPortMode
 	viewPortInput
+	viewRunningSingle
 	viewRunningMulti
 )
 
@@ -70,6 +71,12 @@ type singleSSHDoneMsg struct {
 	err error
 }
 
+type singleStartMsg struct {
+	cmd       *exec.Cmd
+	localPort int
+	err       error
+}
+
 type multiTunnelPlan struct {
 	tunnel    tunnel
 	localPort int
@@ -107,6 +114,8 @@ type projectsApp struct {
 	selectedTunnel    tunnel
 
 	multiSelectedIdxs map[int]bool
+	singleRunningCmd  *exec.Cmd
+	singleRunningPort int
 	multiCustomList   []tunnel
 	multiCustomPorts  []int
 	multiCustomIndex  int
@@ -223,6 +232,20 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.view = viewContainerMenu
 		m.setContainerActionItems()
 		return m, fetchTunnelsCmd(m.token, m.selectedProject.ID)
+	case singleStartMsg:
+		if msg.err != nil {
+			m.errMsg = msg.err.Error()
+			m.status = "Failed to start tunnel"
+			m.view = viewContainerMenu
+			m.setContainerActionItems()
+			return m, nil
+		}
+		m.errMsg = ""
+		m.singleRunningCmd = msg.cmd
+		m.singleRunningPort = msg.localPort
+		m.view = viewRunningSingle
+		m.status = fmt.Sprintf("Tunnel open: localhost:%d -> %s:%d", msg.localPort, m.selectedTunnel.TargetNetwork.IPAddress, m.selectedTunnel.TargetPort)
+		return m, waitSingleTunnelDoneCmd(msg.cmd)
 	case singleSSHDoneMsg:
 		if msg.err != nil {
 			m.errMsg = msg.err.Error()
@@ -231,6 +254,8 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = ""
 			m.status = "Tunnel session closed"
 		}
+		m.singleRunningCmd = nil
+		m.singleRunningPort = 0
 		m.view = viewContainerMenu
 		m.setContainerActionItems()
 		return m, fetchTunnelsCmd(m.token, m.selectedProject.ID)
@@ -312,14 +337,13 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "Creating tunnel..."
 					return m, createTunnelWithKeyCmd(m.token, m.selectedProject.ID, m.selectedContainer, port)
 				case portInputSingle:
-					cmd := tunnelCommand(
+					m.status = "Starting tunnel session..."
+					return m, startSingleTunnelCmd(
 						m.selectedTunnel,
 						filepath.Join(keysDir(), "tunnel-"+m.selectedTunnel.TunnelID),
 						port,
 						m.selectedTunnel.TargetPort,
 					)
-					m.status = "Running tunnel session (Ctrl+C to stop)"
-					return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return singleSSHDoneMsg{err: err} })
 				case portInputMultiCustom:
 					m.multiCustomPorts = append(m.multiCustomPorts, port)
 					m.multiCustomIndex++
@@ -353,10 +377,18 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.multiRunningCmds) > 0 {
 				m.stopAllMulti()
 			}
+			if m.singleRunningCmd != nil {
+				_ = stopSSHProcess(m.singleRunningCmd)
+				m.singleRunningCmd = nil
+			}
 			return m, tea.Quit
 		case "q":
 			if len(m.multiRunningCmds) > 0 {
 				m.stopAllMulti()
+			}
+			if m.singleRunningCmd != nil {
+				_ = stopSSHProcess(m.singleRunningCmd)
+				m.singleRunningCmd = nil
 			}
 			if m.view == viewProjects {
 				return m, tea.Quit
@@ -555,6 +587,18 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			}
+		case viewRunningSingle:
+			if key.String() == "s" || key.String() == "enter" || key.String() == "esc" {
+				if m.singleRunningCmd != nil {
+					_ = stopSSHProcess(m.singleRunningCmd)
+					m.singleRunningCmd = nil
+				}
+				m.singleRunningPort = 0
+				m.view = viewContainerMenu
+				m.setContainerActionItems()
+				m.status = "Stopped tunnel session"
+				return m, fetchTunnelsCmd(m.token, m.selectedProject.ID)
+			}
 		case viewRunningMulti:
 			if key.String() == "s" || key.String() == "enter" || key.String() == "esc" {
 				m.stopAllMulti()
@@ -566,7 +610,7 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.view == viewRunningMulti {
+	if m.view == viewRunningSingle || m.view == viewRunningMulti {
 		return m, nil
 	}
 
@@ -599,6 +643,21 @@ func (m projectsApp) View() string {
 
 	if m.view == viewPortInput {
 		return header + "\n" + m.portInputPrompt + "\n" + m.input.View() + "\n\nEnter to confirm, Esc to cancel"
+	}
+
+	if m.view == viewRunningSingle {
+		var b strings.Builder
+		b.WriteString(header)
+		b.WriteString("\nSingle tunnel session is active:\n\n")
+		b.WriteString(fmt.Sprintf("- %s | localhost:%d -> %s:%d\n",
+			m.selectedTunnel.TunnelID,
+			m.singleRunningPort,
+			m.selectedTunnel.TargetNetwork.IPAddress,
+			m.selectedTunnel.TargetPort,
+		))
+		b.WriteString("\nUse this endpoint locally now.\n")
+		b.WriteString("Press 's' (or Enter/Esc) to stop and return.\n")
+		return b.String()
 	}
 
 	if m.view == viewRunningMulti {
@@ -796,6 +855,22 @@ func createTunnelWithKey(token, projectID string, c container, targetPort int) e
 
 	_, err = renameKeyFiles(tempID, "tunnel-"+t.TunnelID)
 	return err
+}
+
+func startSingleTunnelCmd(t tunnel, keyPath string, localPort, targetPort int) tea.Cmd {
+	return func() tea.Msg {
+		cmd, err := startTunnelConnectionBackground(t, keyPath, localPort, targetPort)
+		if err != nil {
+			return singleStartMsg{err: err}
+		}
+		return singleStartMsg{cmd: cmd, localPort: localPort}
+	}
+}
+
+func waitSingleTunnelDoneCmd(cmd *exec.Cmd) tea.Cmd {
+	return func() tea.Msg {
+		return singleSSHDoneMsg{err: cmd.Wait()}
+	}
 }
 
 func startMultiTunnelsCmd(plans []multiTunnelPlan) tea.Cmd {
