@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: tar.gz
+          - goos: darwin
+            goarch: amd64
+            ext: tar.gz
+          - goos: darwin
+            goarch: arm64
+            ext: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: zip
+          - goos: windows
+            goarch: arm64
+            ext: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          BIN_NAME="hubfly"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BIN_NAME="hubfly.exe"
+          fi
+
+          mkdir -p build dist
+
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build \
+              -trimpath \
+              -ldflags "-s -w -X hubfly-cli/internal/version.Version=${VERSION} -X hubfly-cli/internal/version.Commit=${GITHUB_SHA} -X hubfly-cli/internal/version.Date=${DATE}" \
+              -o "build/${BIN_NAME}" \
+              .
+
+          ASSET_NAME="hubfly_${{ matrix.goos }}_${{ matrix.goarch }}.${{ matrix.ext }}"
+
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            (cd build && zip -q "../dist/${ASSET_NAME}" "${BIN_NAME}")
+          else
+            tar -C build -czf "dist/${ASSET_NAME}" "${BIN_NAME}"
+          fi
+
+          sha256sum "dist/${ASSET_NAME}" > "dist/${ASSET_NAME}.sha256"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/hubfly_${{ matrix.goos }}_${{ matrix.goarch }}.${{ matrix.ext }}
+            dist/hubfly_${{ matrix.goos }}_${{ matrix.goarch }}.${{ matrix.ext }}.sha256
