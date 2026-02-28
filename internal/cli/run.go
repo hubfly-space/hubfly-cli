@@ -8,6 +8,8 @@ import (
 )
 
 func Run(args []string) int {
+	args = configureDebug(args)
+	debugf("debug mode enabled")
 	if err := run(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -64,10 +66,14 @@ func run(args []string) error {
 func printUsage() {
 	fmt.Println("Hubfly CLI")
 	fmt.Println("Usage:")
-	fmt.Println("  hubfly login [--token <token>]")
-	fmt.Println("  hubfly logout")
-	fmt.Println("  hubfly whoami")
-	fmt.Println("  hubfly projects")
-	fmt.Println("  hubfly tunnel <containerIdOrName> <localPort> <targetPort>")
+	fmt.Println("  hubfly [--debug] login [--token <token>]")
+	fmt.Println("  hubfly [--debug] logout")
+	fmt.Println("  hubfly [--debug] whoami")
+	fmt.Println("  hubfly [--debug] projects")
+	fmt.Println("  hubfly [--debug] tunnel <containerIdOrName> <localPort> <targetPort>")
 	fmt.Println("  hubfly service [--port <port>]")
+	fmt.Println("")
+	fmt.Println("Debug mode:")
+	fmt.Println("  --debug")
+	fmt.Println("  HUBFLY_DEBUG=1")
 }

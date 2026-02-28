@@ -40,12 +40,14 @@ func createTunnel(token string, req createTunnelRequest) (tunnel, error) {
 }
 
 func doJSONRequest(method, url, token string, body any, out any) error {
+	var requestBytes []byte
 	var reqBody io.Reader
 	if body != nil {
 		payload, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
+		requestBytes = payload
 		reqBody = bytes.NewBuffer(payload)
 	}
 
@@ -60,15 +62,33 @@ func doJSONRequest(method, url, token string, body any, out any) error {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
+	debugf("HTTP request: %s %s", method, url)
+	if token != "" {
+		debugf("Authorization: Bearer %s", maskToken(token))
+	}
+	if len(requestBytes) > 0 {
+		debugf("Request body: %s", string(requestBytes))
+	}
+
 	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		debugf("HTTP transport error: %v", err)
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	respBytes, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return readErr
+	}
+
+	debugf("HTTP response status: %d", resp.StatusCode)
+	if len(respBytes) > 0 {
+		debugf("Response body: %s", string(respBytes))
+	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBytes, _ := io.ReadAll(resp.Body)
 		msg := strings.TrimSpace(string(respBytes))
 		if msg == "" {
 			msg = "request failed"
@@ -76,8 +96,8 @@ func doJSONRequest(method, url, token string, body any, out any) error {
 		return &apiError{Status: resp.StatusCode, Message: msg}
 	}
 
-	if out == nil {
+	if out == nil || len(respBytes) == 0 {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return json.Unmarshal(respBytes, out)
 }
