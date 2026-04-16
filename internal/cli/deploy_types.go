@@ -13,6 +13,7 @@ type deployContainerBinding struct {
 
 type deployBuildSettings struct {
 	Mode               string   `json:"mode,omitempty"`
+	DockerfilePath     string   `json:"dockerfilePath,omitempty"`
 	WorkingDir         string   `json:"workingDir,omitempty"`
 	ContextDir         string   `json:"contextDir,omitempty"`
 	Runtime            string   `json:"runtime,omitempty"`
@@ -36,9 +37,9 @@ type deployResources struct {
 }
 
 type deployRuntime struct {
-	AutoSleep    bool   `json:"autoSleep"`
-	AutoScale    bool   `json:"autoScale"`
-	Is24x7       bool   `json:"is24x7"`
+	AutoSleep     bool   `json:"autoSleep"`
+	AutoScale     bool   `json:"autoScale"`
+	Is24x7        bool   `json:"is24x7"`
 	AutoScaleMode string `json:"autoScaleMode,omitempty"`
 }
 
@@ -86,19 +87,19 @@ type deployConfigFile struct {
 	Container deployContainerBinding `json:"container"`
 	Build     deployBuildSettings    `json:"build"`
 	Deploy    struct {
-		Tier               string                `json:"tier"`
-		Resources          deployResources       `json:"resources"`
-		Runtime            deployRuntime         `json:"runtime"`
+		Tier                string               `json:"tier"`
+		Resources           deployResources      `json:"resources"`
+		Runtime             deployRuntime        `json:"runtime"`
 		NetworkPrimaryAlias string               `json:"networkPrimaryAlias,omitempty"`
-		NetworkAliases     []string              `json:"networkAliases,omitempty"`
-		Ports              []deployPort          `json:"ports,omitempty"`
-		Volumes            []deployVolume        `json:"volumes,omitempty"`
-		Process            deployProcess         `json:"process,omitempty"`
-		Healthcheck        *deployHealthcheck    `json:"healthcheck,omitempty"`
-		RestartPolicy      *deployRestartPolicy  `json:"restartPolicy,omitempty"`
-		Labels             map[string]string     `json:"labels,omitempty"`
+		NetworkAliases      []string             `json:"networkAliases,omitempty"`
+		Ports               []deployPort         `json:"ports,omitempty"`
+		Volumes             []deployVolume       `json:"volumes,omitempty"`
+		Process             deployProcess        `json:"process,omitempty"`
+		Healthcheck         *deployHealthcheck   `json:"healthcheck,omitempty"`
+		RestartPolicy       *deployRestartPolicy `json:"restartPolicy,omitempty"`
+		Labels              map[string]string    `json:"labels,omitempty"`
 	} `json:"deploy"`
-	Env []deployEnvVar `json:"env,omitempty"`
+	Env      []deployEnvVar `json:"env,omitempty"`
 	Metadata struct {
 		BuilderVersion string `json:"builderVersion,omitempty"`
 		LastBuildID    string `json:"lastBuildId,omitempty"`
@@ -132,23 +133,23 @@ type builderInspectOutput struct {
 }
 
 type cliDeploymentConfig struct {
-	ProjectName         string                       `json:"projectName"`
-	ContainerName       string                       `json:"containerName"`
-	NetworkPrimaryAlias string                       `json:"networkPrimaryAlias,omitempty"`
-	NetworkAliases      []string                     `json:"networkAliases,omitempty"`
-	Region              string                       `json:"region"`
-	ProjectID           string                       `json:"projectId"`
-	Tier                string                       `json:"tier"`
-	Resources           cliDeploymentResources       `json:"resources"`
-	AttachedVolumes     []cliDeploymentVolume        `json:"attachedVolumes,omitempty"`
-	Runtime             cliDeploymentRuntime         `json:"runtime"`
-	Process             *cliDeploymentProcess        `json:"process,omitempty"`
-	Healthcheck         *cliDeploymentHealthcheck    `json:"healthcheck,omitempty"`
-	RestartPolicy       *cliDeploymentRestartPolicy  `json:"restartPolicy,omitempty"`
-	Labels              map[string]string            `json:"labels,omitempty"`
-	Networking          cliDeploymentNetworking      `json:"networking"`
+	ProjectName          string                      `json:"projectName"`
+	ContainerName        string                      `json:"containerName"`
+	NetworkPrimaryAlias  string                      `json:"networkPrimaryAlias,omitempty"`
+	NetworkAliases       []string                    `json:"networkAliases,omitempty"`
+	Region               string                      `json:"region"`
+	ProjectID            string                      `json:"projectId"`
+	Tier                 string                      `json:"tier"`
+	Resources            cliDeploymentResources      `json:"resources"`
+	AttachedVolumes      []cliDeploymentVolume       `json:"attachedVolumes,omitempty"`
+	Runtime              cliDeploymentRuntime        `json:"runtime"`
+	Process              *cliDeploymentProcess       `json:"process,omitempty"`
+	Healthcheck          *cliDeploymentHealthcheck   `json:"healthcheck,omitempty"`
+	RestartPolicy        *cliDeploymentRestartPolicy `json:"restartPolicy,omitempty"`
+	Labels               map[string]string           `json:"labels,omitempty"`
+	Networking           cliDeploymentNetworking     `json:"networking"`
 	EnvironmentVariables []cliDeploymentEnvVar       `json:"environmentVariables,omitempty"`
-	Source              cliDeploymentSource          `json:"source"`
+	Source               cliDeploymentSource         `json:"source"`
 }
 
 type cliDeploymentSource struct {
@@ -170,9 +171,9 @@ type cliDeploymentVolume struct {
 }
 
 type cliDeploymentRuntime struct {
-	AutoSleep    bool   `json:"autoSleep"`
-	AutoScale    bool   `json:"autoScale"`
-	Is24x7       bool   `json:"is24x7"`
+	AutoSleep     bool   `json:"autoSleep"`
+	AutoScale     bool   `json:"autoScale"`
+	Is24x7        bool   `json:"is24x7"`
 	AutoScaleMode string `json:"autoScaleMode,omitempty"`
 }
 
@@ -221,10 +222,10 @@ type createDeploySessionRequest struct {
 }
 
 type deploySessionResponse struct {
-	BuildID   string `json:"buildId"`
-	ProjectID string `json:"projectId"`
+	BuildID     string `json:"buildId"`
+	ProjectID   string `json:"projectId"`
 	ProjectName string `json:"projectName"`
-	Region    struct {
+	Region      struct {
 		ID        string `json:"id"`
 		Name      string `json:"name"`
 		Location  string `json:"location"`

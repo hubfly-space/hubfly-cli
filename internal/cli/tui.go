@@ -24,13 +24,25 @@ func (i listItem) Description() string { return i.desc }
 func (i listItem) FilterValue() string { return i.title + " " + i.desc }
 
 type menuModel struct {
-	list list.Model
+	list     list.Model
+	subtitle string
 }
 
 func (m menuModel) Init() tea.Cmd { return nil }
 
 func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		width := msg.Width - 6
+		height := msg.Height - 8
+		if width < 40 {
+			width = 40
+		}
+		if height < 12 {
+			height = 12
+		}
+		m.list.SetSize(width, height)
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "enter":
@@ -47,7 +59,12 @@ func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m menuModel) View() string {
-	return m.list.View()
+	if strings.TrimSpace(m.subtitle) == "" {
+		return m.list.View()
+	}
+
+	subtitleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	return subtitleStyle.Render(m.subtitle) + "\n\n" + m.list.View()
 }
 
 func tuiPickOne(title, subtitle string, options []listOption) (int, bool, error) {
@@ -56,16 +73,18 @@ func tuiPickOne(title, subtitle string, options []listOption) (int, bool, error)
 		items = append(items, listItem{title: opt.Title, desc: opt.Desc})
 	}
 
-	l := list.New(items, list.NewDefaultDelegate(), 100, 24)
+	l := list.New(items, list.NewDefaultDelegate(), 72, 18)
 	l.Title = title
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
 	l.SetShowHelp(true)
-	if strings.TrimSpace(subtitle) != "" {
-		l.NewStatusMessage(subtitle)
-	}
-
-	m := menuModel{list: l}
+	l.Styles.Title = l.Styles.Title.Bold(true).Foreground(lipgloss.Color("12"))
+	l.Styles.StatusBar = l.Styles.StatusBar.Foreground(lipgloss.Color("8"))
+	l.Styles.PaginationStyle = l.Styles.PaginationStyle.Foreground(lipgloss.Color("8"))
+	l.Styles.HelpStyle = l.Styles.HelpStyle.Foreground(lipgloss.Color("8"))
+	l.Styles.FilterPrompt = l.Styles.FilterPrompt.Foreground(lipgloss.Color("10")).Bold(true)
+	l.Styles.FilterCursor = l.Styles.FilterCursor.Foreground(lipgloss.Color("10")).Bold(true)
+	m := menuModel{list: l, subtitle: subtitle}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	result, err := p.Run()
 	if err != nil {
