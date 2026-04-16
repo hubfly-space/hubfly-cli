@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	golang.org/x/crypto v0.46.0
 	golang.org/x/mod v0.30.0
+	golang.org/x/term v0.38.0
 )
 
 require (

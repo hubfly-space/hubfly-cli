@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -18,6 +19,12 @@ const (
 	builderRepoOwner = "hubfly-space"
 	builderRepoName  = "hubfly-builder"
 )
+
+type builderInstallState struct {
+	Version   string `json:"version,omitempty"`
+	Source    string `json:"source,omitempty"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
+}
 
 func deployFlow(forceAdvanced bool) error {
 	token, err := ensureAuth(true)
@@ -30,36 +37,32 @@ func deployFlow(forceAdvanced bool) error {
 		return err
 	}
 
+	printDeployHeader(projectDir)
+
 	cfgPath := deployConfigPath(projectDir)
 	cfg, created, err := loadOrInitDeployConfig(projectDir)
 	if err != nil {
 		return err
 	}
 
-	builderPath, builderVersion, err := ensureLocalBuilderBinary()
+	prepared, err := prepareDeployBuild(projectDir, cfgPath, &cfg)
 	if err != nil {
 		return err
 	}
-	cfg.Metadata.BuilderVersion = builderVersion
-
-	inspect, err := runBuilderInspect(builderPath, projectDir, cfgPath)
-	if err != nil {
-		return err
-	}
-	applyInspectOutput(&cfg, inspect)
 	if err := ensureDeployProjectBinding(token, projectDir, &cfg); err != nil {
 		return err
 	}
+	cfg.Metadata.BuilderVersion = prepared.BuilderVersion
 	if err := saveDeployConfig(cfgPath, cfg); err != nil {
 		return err
 	}
 
+	printDeploySummary(projectDir, cfg, prepared)
+	printDeployWarnings("Builder warnings", prepared.Warnings)
+
 	editConfig := forceAdvanced
 	if !forceAdvanced {
-		editConfig, err = promptYesNo(
-			"Configure more in hubfly.build.json before build",
-			created,
-		)
+		editConfig, err = promptDeployReviewChoice(created)
 		if err != nil {
 			return err
 		}
@@ -73,32 +76,24 @@ func deployFlow(forceAdvanced bool) error {
 		if err != nil {
 			return err
 		}
-		cfg.Metadata.BuilderVersion = builderVersion
-		if err := ensureDeployProjectBinding(token, projectDir, &cfg); err != nil {
-			return err
-		}
-		if err := saveDeployConfig(cfgPath, cfg); err != nil {
-			return err
-		}
-
-		inspect, err = runBuilderInspect(builderPath, projectDir, cfgPath)
+		prepared, err = prepareDeployBuild(projectDir, cfgPath, &cfg)
 		if err != nil {
 			return err
 		}
-		applyInspectOutput(&cfg, inspect)
+		if err := ensureDeployProjectBinding(token, projectDir, &cfg); err != nil {
+			return err
+		}
+		cfg.Metadata.BuilderVersion = prepared.BuilderVersion
 		if err := saveDeployConfig(cfgPath, cfg); err != nil {
 			return err
 		}
-	}
-
-	dockerfilePath, err := writeGeneratedDockerfile(projectDir, inspect.Dockerfile)
-	if err != nil {
-		return err
+		printDeploySummary(projectDir, cfg, prepared)
+		printDeployWarnings("Builder warnings", prepared.Warnings)
 	}
 
 	deploymentConfig := buildDeploymentConfig(cfg)
 	session, err := createDeploySession(token, createDeploySessionRequest{
-		BuilderVersion:   builderVersion,
+		BuilderVersion:   prepared.BuilderVersion,
 		BoundContainerID: strings.TrimSpace(cfg.Container.ID),
 		Config:           deploymentConfig,
 	})
@@ -107,8 +102,11 @@ func deployFlow(forceAdvanced bool) error {
 	}
 
 	localTag := generateLocalImageTag(session.BuildID)
-	fmt.Printf("Building image locally with hubfly-builder %s\n", builderVersion)
-	if err := buildLocalImage(projectDir, dockerfilePath, localTag, cfg); err != nil {
+	printDeployStep(
+		"Local build",
+		fmt.Sprintf("docker build using %s", displayDeployBuildSource(projectDir, prepared)),
+	)
+	if err := buildLocalImage(projectDir, prepared.DockerfilePath, localTag, cfg); err != nil {
 		_ = reportDeployCallback(
 			session.BuildID,
 			"failed",
@@ -121,10 +119,9 @@ func deployFlow(forceAdvanced bool) error {
 		_ = removeLocalImage(localTag)
 	}()
 
-	fmt.Printf(
-		"Uploading image to %s for project %s\n",
-		session.Region.Name,
-		session.ProjectName,
+	printDeployStep(
+		"Image upload",
+		fmt.Sprintf("Streaming image to %s (%s)", session.Region.Name, session.Region.PrimaryIP),
 	)
 	if err := uploadLocalImage(localTag, session); err != nil {
 		_ = reportDeployCallback(
@@ -153,7 +150,7 @@ func deployFlow(forceAdvanced bool) error {
 	cfg.Project.ID = status.Build.ProjectID
 	cfg.Project.Name = status.Build.ProjectName
 	cfg.Project.Region = status.Build.RegionID
-	cfg.Metadata.BuilderVersion = builderVersion
+	cfg.Metadata.BuilderVersion = prepared.BuilderVersion
 	cfg.Metadata.LastBuildID = status.Build.ID
 	cfg.Metadata.LastImageTag = status.Build.ImageTag
 	cfg.Metadata.LastDeployedAt = time.Now().UTC().Format(time.RFC3339)
@@ -167,6 +164,135 @@ func deployFlow(forceAdvanced bool) error {
 	fmt.Printf("Image:     %s\n", status.Build.ImageTag)
 	fmt.Printf("Config:    %s\n", cfgPath)
 	return nil
+}
+
+func prepareDeployBuild(projectDir, cfgPath string, cfg *deployConfigFile) (deployPreparedBuild, error) {
+	if hasCustomDockerfileConfig(*cfg) {
+		dockerfilePath, err := resolveConfiguredDockerfilePath(projectDir, *cfg)
+		if err != nil {
+			return deployPreparedBuild{}, err
+		}
+		cfg.Metadata.BuilderVersion = ""
+		return deployPreparedBuild{
+			DockerfilePath:  dockerfilePath,
+			BuilderVersion:  "",
+			BuildSource:     "dockerfile",
+			BuildSourcePath: dockerfilePath,
+		}, nil
+	}
+
+	if dockerfilePath, ok := findProjectDockerfile(projectDir, *cfg); ok {
+		cfg.Metadata.BuilderVersion = ""
+		return deployPreparedBuild{
+			DockerfilePath:  dockerfilePath,
+			BuilderVersion:  "",
+			BuildSource:     "dockerfile",
+			BuildSourcePath: dockerfilePath,
+		}, nil
+	}
+
+	builderPath, builderVersion, err := ensureLocalBuilderBinary()
+	if err != nil {
+		return deployPreparedBuild{}, err
+	}
+
+	inspect, err := runBuilderInspect(builderPath, projectDir, cfgPath)
+	if err != nil {
+		return deployPreparedBuild{}, wrapBuilderInspectError(projectDir, *cfg, err)
+	}
+
+	applyInspectOutput(cfg, inspect)
+	dockerfilePath, err := writeGeneratedDockerfile(projectDir, inspect.Dockerfile)
+	if err != nil {
+		return deployPreparedBuild{}, err
+	}
+
+	cfg.Metadata.BuilderVersion = builderVersion
+	return deployPreparedBuild{
+		DockerfilePath:  dockerfilePath,
+		BuilderVersion:  builderVersion,
+		BuildSource:     "generated",
+		BuildSourcePath: dockerfilePath,
+		Warnings:        cloneStrings(inspect.BuildConfig.ValidationWarnings),
+	}, nil
+}
+
+func hasCustomDockerfileConfig(cfg deployConfigFile) bool {
+	return normalizeBuildMode(cfg.Build.Mode) == "dockerfile" || strings.TrimSpace(cfg.Build.DockerfilePath) != ""
+}
+
+func resolveConfiguredDockerfilePath(projectDir string, cfg deployConfigFile) (string, error) {
+	path := strings.TrimSpace(cfg.Build.DockerfilePath)
+	if path == "" {
+		path = "Dockerfile"
+	}
+	return validateDockerfilePath(projectDir, path)
+}
+
+func findProjectDockerfile(projectDir string, cfg deployConfigFile) (string, bool) {
+	candidates := make([]string, 0, 2)
+	workingDir := strings.TrimSpace(cfg.Build.WorkingDir)
+	if workingDir != "" && workingDir != "." {
+		candidates = append(candidates, filepath.Join(workingDir, "Dockerfile"))
+	}
+	candidates = append(candidates, "Dockerfile")
+
+	for _, candidate := range candidates {
+		path, err := validateDockerfilePath(projectDir, candidate)
+		if err == nil {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+func validateDockerfilePath(projectDir, dockerfilePath string) (string, error) {
+	if strings.TrimSpace(dockerfilePath) == "" {
+		return "", fmt.Errorf("dockerfile path is required")
+	}
+
+	projectDir, err := filepath.Abs(projectDir)
+	if err != nil {
+		return "", err
+	}
+
+	resolved := dockerfilePath
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(projectDir, filepath.Clean(dockerfilePath))
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", err
+	}
+	relPath, err := filepath.Rel(projectDir, resolved)
+	if err != nil {
+		return "", err
+	}
+	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("dockerfile path must stay inside the project directory: %s", dockerfilePath)
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("dockerfile not found: %s", dockerfilePath)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("dockerfile path is not a regular file: %s", dockerfilePath)
+	}
+	return resolved, nil
+}
+
+func wrapBuilderInspectError(projectDir string, cfg deployConfigFile, cause error) error {
+	message := strings.TrimSpace(cause.Error())
+	if hasCustomDockerfileConfig(cfg) {
+		return fmt.Errorf("failed to prepare build with the configured Dockerfile: %s", message)
+	}
+
+	return fmt.Errorf(
+		"%s\nAdd a project Dockerfile and run `hubfly deploy` again, or set `build.mode` to `dockerfile` in %s to use a custom Dockerfile directly.",
+		message,
+		deployConfigPath(projectDir),
+	)
 }
 
 func ensureDeployProjectBinding(token, projectDir string, cfg *deployConfigFile) error {
@@ -192,13 +318,7 @@ func ensureDeployProjectBinding(token, projectDir string, cfg *deployConfigFile)
 		return createProjectBinding(token, projectDir, cfg)
 	}
 
-	fmt.Println("Select a project:")
-	fmt.Println("  1. Create new project")
-	for idx, p := range projects {
-		fmt.Printf("  %d. %s [%s]\n", idx+2, p.Name, p.Region.Name)
-	}
-
-	selection, err := promptMenuSelection("Project", len(projects)+1, 1)
+	selection, err := selectProjectIndex(projects)
 	if err != nil {
 		return err
 	}
@@ -241,11 +361,7 @@ func createProjectBinding(token, projectDir string, cfg *deployConfigFile) error
 		return err
 	}
 
-	fmt.Println("Select a region:")
-	for idx, entry := range availableRegions {
-		fmt.Printf("  %d. %s [%s]\n", idx+1, entry.Name, entry.Location)
-	}
-	selection, err := promptMenuSelection("Region", len(availableRegions), 1)
+	selection, err := selectRegionIndex(availableRegions)
 	if err != nil {
 		return err
 	}
@@ -292,10 +408,19 @@ func ensureLocalBuilderBinary() (string, string, error) {
 
 	downloadURL := strings.TrimSpace(os.Getenv("HUBFLY_BUILDER_URL"))
 	if downloadURL != "" {
+		sourceKey := builderInstallSourceForURL(downloadURL)
+		if path, version, ok := reuseInstalledBuilder(targetPath, sourceKey, ""); ok {
+			return path, version, nil
+		}
 		version, err := installBuilderFromURL(targetPath, downloadURL)
 		if err != nil {
 			return cachedBuilderOrError(targetPath, err)
 		}
+		_ = saveBuilderInstallState(builderInstallState{
+			Version:   version,
+			Source:    sourceKey,
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		})
 		return targetPath, version, nil
 	}
 
@@ -310,6 +435,11 @@ func ensureLocalBuilderBinary() (string, string, error) {
 	assetName, err := expectedBuilderAssetName(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return cachedBuilderOrError(targetPath, err)
+	}
+
+	sourceKey := builderInstallSourceForRelease(release.TagName, assetName)
+	if path, version, ok := reuseInstalledBuilder(targetPath, sourceKey, release.TagName); ok {
+		return path, version, nil
 	}
 
 	assetURL, err := findBuilderAssetURL(release, assetName)
@@ -327,7 +457,82 @@ func ensureLocalBuilderBinary() (string, string, error) {
 	if strings.TrimSpace(version) == "" || strings.EqualFold(version, "unknown") {
 		version = strings.TrimSpace(release.TagName)
 	}
+	_ = saveBuilderInstallState(builderInstallState{
+		Version:   version,
+		Source:    sourceKey,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	})
 	return targetPath, version, nil
+}
+
+func reuseInstalledBuilder(targetPath, sourceKey, expectedVersion string) (string, string, bool) {
+	version, err := localBuilderVersion(targetPath)
+	if err != nil {
+		return "", "", false
+	}
+
+	if expectedVersion != "" && builderVersionsMatch(version, expectedVersion) {
+		return targetPath, preferredBuilderVersion(version, expectedVersion), true
+	}
+
+	state, err := loadBuilderInstallState()
+	if err != nil {
+		return "", "", false
+	}
+	if strings.TrimSpace(state.Source) != strings.TrimSpace(sourceKey) {
+		return "", "", false
+	}
+
+	return targetPath, preferredBuilderVersion(version, state.Version, expectedVersion), true
+}
+
+func builderInstallSourceForURL(downloadURL string) string {
+	return "url:" + strings.TrimSpace(downloadURL)
+}
+
+func builderInstallSourceForRelease(tagName, assetName string) string {
+	return "release:" + strings.TrimSpace(tagName) + ":" + strings.TrimSpace(assetName)
+}
+
+func builderVersionsMatch(installedVersion, expectedVersion string) bool {
+	installedVersion = normalizeVersion(installedVersion)
+	expectedVersion = normalizeVersion(expectedVersion)
+	return installedVersion != "" && installedVersion == expectedVersion
+}
+
+func preferredBuilderVersion(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.EqualFold(value, "unknown") {
+			continue
+		}
+		return value
+	}
+	return "unknown"
+}
+
+func loadBuilderInstallState() (builderInstallState, error) {
+	var state builderInstallState
+	data, err := os.ReadFile(builderInstallStatePath())
+	if err != nil {
+		return state, err
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return builderInstallState{}, err
+	}
+	return state, nil
+}
+
+func saveBuilderInstallState(state builderInstallState) error {
+	if err := os.MkdirAll(filepath.Dir(builderInstallStatePath()), 0o755); err != nil {
+		return err
+	}
+	payload, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	return os.WriteFile(builderInstallStatePath(), payload, 0o644)
 }
 
 func runBuilderInspect(builderPath, projectDir, cfgPath string) (builderInspectOutput, error) {
@@ -481,11 +686,11 @@ func buildDeploymentConfig(cfg deployConfigFile) cliDeploymentConfig {
 			Is24x7:        cfg.Deploy.Runtime.Is24x7,
 			AutoScaleMode: cfg.Deploy.Runtime.AutoScaleMode,
 		},
-		Process:        process,
-		Healthcheck:    healthcheck,
-		RestartPolicy:  restartPolicy,
-		Labels:         cfg.Deploy.Labels,
-		Networking:     cliDeploymentNetworking{Ports: ports},
+		Process:              process,
+		Healthcheck:          healthcheck,
+		RestartPolicy:        restartPolicy,
+		Labels:               cfg.Deploy.Labels,
+		Networking:           cliDeploymentNetworking{Ports: ports},
 		EnvironmentVariables: envVars,
 		Source: cliDeploymentSource{
 			Type:        "docker",
@@ -590,7 +795,8 @@ func uploadLocalImage(localTag string, session deploySessionResponse) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
-	req, err := http.NewRequest(http.MethodPost, session.Upload.URL, stdout)
+	progress := newUploadProgress("Upload progress", estimateLocalImageSize(localTag))
+	req, err := http.NewRequest(http.MethodPost, session.Upload.URL, progress.Wrap(stdout))
 	if err != nil {
 		return err
 	}
@@ -603,6 +809,8 @@ func uploadLocalImage(localTag string, session deploySessionResponse) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	progress.Start()
+	defer progress.Finish()
 
 	resp, requestErr := client.Do(req)
 	waitErr := cmd.Wait()
@@ -623,6 +831,18 @@ func uploadLocalImage(localTag string, session deploySessionResponse) error {
 		return fmt.Errorf("upload failed with %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil
+}
+
+func estimateLocalImageSize(localTag string) int64 {
+	output, err := commandOutput(exec.Command("docker", "image", "inspect", localTag, "--format", "{{.Size}}"))
+	if err != nil {
+		return 0
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(output), 10, 64)
+	if err != nil || size <= 0 {
+		return 0
+	}
+	return size
 }
 
 func waitForDeploySession(token, buildID string) (deploySessionStatusResponse, error) {

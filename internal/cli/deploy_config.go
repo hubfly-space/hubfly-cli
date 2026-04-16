@@ -29,6 +29,10 @@ func builderBinaryPath() string {
 	return filepath.Join(hubflyDir(), "tools", name)
 }
 
+func builderInstallStatePath() string {
+	return filepath.Join(hubflyDir(), "tools", "hubfly-builder.json")
+}
+
 func loadOrInitDeployConfig(projectDir string) (deployConfigFile, bool, error) {
 	path := deployConfigPath(projectDir)
 	content, err := os.ReadFile(path)
@@ -72,6 +76,7 @@ func defaultDeployConfig(projectDir string) deployConfigFile {
 	cfg.Project.Name = base
 	cfg.Container.Name = containerName
 	cfg.Build.Mode = "auto"
+	cfg.Build.DockerfilePath = ""
 	cfg.Build.WorkingDir = "."
 	cfg.Build.ContextDir = "."
 	cfg.Deploy.Tier = "dedicated"
@@ -108,6 +113,11 @@ func normalizeDeployConfig(cfg *deployConfigFile, projectDir string) {
 	}
 	if strings.TrimSpace(cfg.Build.Mode) == "" {
 		cfg.Build.Mode = defaults.Build.Mode
+	}
+	cfg.Build.Mode = normalizeBuildMode(cfg.Build.Mode)
+	cfg.Build.DockerfilePath = strings.TrimSpace(cfg.Build.DockerfilePath)
+	if cfg.Build.Mode == "dockerfile" && cfg.Build.DockerfilePath == "" {
+		cfg.Build.DockerfilePath = "Dockerfile"
 	}
 	if strings.TrimSpace(cfg.Build.WorkingDir) == "" {
 		cfg.Build.WorkingDir = defaults.Build.WorkingDir
@@ -218,5 +228,16 @@ func normalizeEnvScope(value string) string {
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return "runtime"
+	}
+}
+
+func normalizeBuildMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "manual":
+		return "manual"
+	case "docker", "dockerfile":
+		return "dockerfile"
+	default:
+		return "auto"
 	}
 }
