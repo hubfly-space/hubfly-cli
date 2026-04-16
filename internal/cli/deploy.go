@@ -14,7 +14,10 @@ import (
 	"time"
 )
 
-const defaultBuilderDownloadURL = "https://github.com/hubfly-space/hubfly-builder/releases/latest/download/hubfly-builder"
+const (
+	builderRepoOwner = "hubfly-space"
+	builderRepoName  = "hubfly-builder"
+)
 
 func deployFlow(forceAdvanced bool) error {
 	token, err := ensureAuth(true)
@@ -282,65 +285,49 @@ func defaultProjectName(projectDir, current string) string {
 }
 
 func ensureLocalBuilderBinary() (string, string, error) {
-	if runtime.GOOS != "linux" {
-		return "", "", fmt.Errorf("hubfly deploy currently supports automatic builder download on linux only")
-	}
-
 	targetPath := builderBinaryPath()
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return "", "", err
 	}
 
 	downloadURL := strings.TrimSpace(os.Getenv("HUBFLY_BUILDER_URL"))
-	if downloadURL == "" {
-		downloadURL = defaultBuilderDownloadURL
-	}
-
-	tmpPath := targetPath + ".download"
-	req, err := http.NewRequest(http.MethodGet, downloadURL, nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("User-Agent", "hubfly-cli-deploy")
-
-	client := &http.Client{Timeout: 2 * time.Minute}
-	resp, err := client.Do(req)
-	if err == nil {
-		defer resp.Body.Close()
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			file, createErr := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
-			if createErr != nil {
-				return "", "", createErr
-			}
-			if _, copyErr := io.Copy(file, resp.Body); copyErr != nil {
-				_ = file.Close()
-				return "", "", copyErr
-			}
-			if closeErr := file.Close(); closeErr != nil {
-				return "", "", closeErr
-			}
-			if chmodErr := os.Chmod(tmpPath, 0o755); chmodErr != nil {
-				return "", "", chmodErr
-			}
-			if renameErr := os.Rename(tmpPath, targetPath); renameErr != nil {
-				return "", "", renameErr
-			}
-		} else {
-			err = fmt.Errorf("builder download failed with status %d", resp.StatusCode)
+	if downloadURL != "" {
+		version, err := installBuilderFromURL(targetPath, downloadURL)
+		if err != nil {
+			return cachedBuilderOrError(targetPath, err)
 		}
+		return targetPath, version, nil
 	}
 
+	release, err := fetchLatestReleaseForRepo(builderRepoOwner, builderRepoName)
 	if err != nil {
-		if _, statErr := os.Stat(targetPath); statErr != nil {
-			return "", "", err
-		}
+		return cachedBuilderOrError(
+			targetPath,
+			fmt.Errorf("failed to fetch latest hubfly-builder release: %w", err),
+		)
 	}
 
-	version, versionErr := commandOutput(exec.Command(targetPath, "version"))
-	if versionErr != nil {
-		return targetPath, "unknown", nil
+	assetName, err := expectedBuilderAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return cachedBuilderOrError(targetPath, err)
 	}
-	return targetPath, strings.TrimSpace(version), nil
+
+	assetURL, err := findBuilderAssetURL(release, assetName)
+	if err != nil {
+		return cachedBuilderOrError(targetPath, err)
+	}
+
+	version, err := installBuilderFromURL(targetPath, assetURL)
+	if err != nil {
+		return cachedBuilderOrError(
+			targetPath,
+			fmt.Errorf("failed to install hubfly-builder %s for %s/%s: %w", release.TagName, runtime.GOOS, runtime.GOARCH, err),
+		)
+	}
+	if strings.TrimSpace(version) == "" || strings.EqualFold(version, "unknown") {
+		version = strings.TrimSpace(release.TagName)
+	}
+	return targetPath, version, nil
 }
 
 func runBuilderInspect(builderPath, projectDir, cfgPath string) (builderInspectOutput, error) {
@@ -384,7 +371,12 @@ func openDeployConfigEditor(path string) error {
 		return err
 	}
 
-	cmd := exec.Command("bash", "-lc", fmt.Sprintf("%s %q", editor, path))
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command(editor, path)
+	} else {
+		cmd = exec.Command("bash", "-lc", fmt.Sprintf("%s %q", editor, path))
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -669,4 +661,145 @@ func removeLocalImage(localTag string) error {
 func commandOutput(cmd *exec.Cmd) (string, error) {
 	output, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(output)), err
+}
+
+func installBuilderFromURL(targetPath, downloadURL string) (string, error) {
+	newBinary, err := downloadAndExtractNamedBinary(
+		downloadURL,
+		builderBinaryCandidates(),
+	)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.Remove(newBinary) }()
+
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return "", err
+	}
+
+	if err := copyFile(targetPath, newBinary); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(targetPath, 0o755); err != nil && runtime.GOOS != "windows" {
+		return "", err
+	}
+
+	version, err := commandOutput(exec.Command(targetPath, "version"))
+	if err != nil {
+		return "unknown", nil
+	}
+	return strings.TrimSpace(version), nil
+}
+
+func cachedBuilderOrError(targetPath string, cause error) (string, string, error) {
+	version, cachedErr := localBuilderVersion(targetPath)
+	if cachedErr != nil {
+		return "", "", cause
+	}
+
+	fmt.Fprintf(
+		os.Stderr,
+		"Warning: %v\nUsing cached hubfly-builder %s at %s\n",
+		cause,
+		version,
+		targetPath,
+	)
+	return targetPath, version, nil
+}
+
+func localBuilderVersion(targetPath string) (string, error) {
+	if _, err := os.Stat(targetPath); err != nil {
+		return "", err
+	}
+	version, err := commandOutput(exec.Command(targetPath, "version"))
+	if err != nil {
+		return "unknown", nil
+	}
+	version = strings.TrimSpace(version)
+	if version == "" {
+		version = "unknown"
+	}
+	return version, nil
+}
+
+func builderBinaryCandidates() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"hubfly-builder.exe", "hubfly-builder"}
+	}
+	return []string{"hubfly-builder", "hubfly-builder.exe"}
+}
+
+func expectedBuilderAssetName(goos, goarch string) (string, error) {
+	switch goos {
+	case "linux", "darwin":
+		return fmt.Sprintf("hubfly-builder_%s_%s.tar.gz", goos, goarch), nil
+	case "windows":
+		return fmt.Sprintf("hubfly-builder_%s_%s.zip", goos, goarch), nil
+	default:
+		return "", fmt.Errorf(
+			"hubfly-builder releases do not publish binaries for %s/%s. Supported OS families are linux, darwin, and windows",
+			goos,
+			goarch,
+		)
+	}
+}
+
+func findBuilderAssetURL(rel githubRelease, assetName string) (string, error) {
+	assetURL, err := findAssetURL(rel, assetName)
+	if err == nil {
+		return assetURL, nil
+	}
+
+	available := make([]string, 0, len(rel.Assets))
+	for _, asset := range rel.Assets {
+		name := strings.TrimSpace(asset.Name)
+		if name == "" || strings.HasSuffix(name, ".sha256") {
+			continue
+		}
+		available = append(available, name)
+	}
+	if len(available) == 0 {
+		return "", fmt.Errorf(
+			"latest hubfly-builder release %s has no downloadable binary assets",
+			rel.TagName,
+		)
+	}
+
+	return "", fmt.Errorf(
+		"latest hubfly-builder release %s does not include %q for %s/%s. Available assets: %s",
+		rel.TagName,
+		assetName,
+		runtime.GOOS,
+		runtime.GOARCH,
+		strings.Join(available, ", "),
+	)
+}
+
+func copyFile(targetPath, sourcePath string) error {
+	in, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+
+	tmpPath := targetPath + ".tmp"
+	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	_ = os.Remove(targetPath)
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }

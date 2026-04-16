@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"unicode"
@@ -21,7 +22,11 @@ func generatedDockerfilePath(projectDir string) string {
 }
 
 func builderBinaryPath() string {
-	return filepath.Join(hubflyDir(), "tools", "hubfly-builder")
+	name := "hubfly-builder"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(hubflyDir(), "tools", name)
 }
 
 func loadOrInitDeployConfig(projectDir string) (deployConfigFile, bool, error) {

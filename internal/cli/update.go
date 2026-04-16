@@ -97,8 +97,12 @@ func updateFlow(checkOnly bool) error {
 }
 
 func fetchLatestRelease() (githubRelease, error) {
+	return fetchLatestReleaseForRepo(version.RepoOwner, version.RepoName)
+}
+
+func fetchLatestReleaseForRepo(owner, repo string) (githubRelease, error) {
 	var rel githubRelease
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", version.RepoOwner, version.RepoName)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -160,6 +164,13 @@ func findAssetURL(rel githubRelease, name string) (string, error) {
 }
 
 func downloadAndExtractBinary(assetURL string) (string, error) {
+	return downloadAndExtractNamedBinary(
+		assetURL,
+		[]string{"hubfly", "hubfly-cli", "hubfly.exe"},
+	)
+}
+
+func downloadAndExtractNamedBinary(assetURL string, binaryCandidates []string) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, assetURL, nil)
 	if err != nil {
 		return "", err
@@ -197,14 +208,24 @@ func downloadAndExtractBinary(assetURL string) (string, error) {
 		return "", err
 	}
 
-	binaryPath := filepath.Join(tmpDir, "hubfly-new")
-	assetName := expectedAssetName(runtime.GOOS, runtime.GOARCH)
-	if strings.HasSuffix(assetName, ".zip") {
-		if err := extractBinaryFromZip(archivePath, binaryPath); err != nil {
+	outputName := "binary"
+	if len(binaryCandidates) > 0 {
+		outputName = binaryCandidates[0]
+	}
+	binaryPath := filepath.Join(tmpDir, outputName)
+
+	switch {
+	case strings.HasSuffix(strings.ToLower(assetURL), ".zip"):
+		if err := extractBinaryFromZipByNames(archivePath, binaryPath, binaryCandidates...); err != nil {
 			return "", err
 		}
-	} else {
-		if err := extractBinaryFromTarGz(archivePath, binaryPath); err != nil {
+	case strings.HasSuffix(strings.ToLower(assetURL), ".tar.gz"),
+		strings.HasSuffix(strings.ToLower(assetURL), ".tgz"):
+		if err := extractBinaryFromTarGzByNames(archivePath, binaryPath, binaryCandidates...); err != nil {
+			return "", err
+		}
+	default:
+		if err := os.Rename(archivePath, binaryPath); err != nil {
 			return "", err
 		}
 	}
@@ -215,6 +236,10 @@ func downloadAndExtractBinary(assetURL string) (string, error) {
 }
 
 func extractBinaryFromTarGz(archivePath, outputPath string) error {
+	return extractBinaryFromTarGzByNames(archivePath, outputPath, "hubfly", "hubfly-cli", "hubfly.exe")
+}
+
+func extractBinaryFromTarGzByNames(archivePath, outputPath string, binaryCandidates ...string) error {
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return err
@@ -228,6 +253,14 @@ func extractBinaryFromTarGz(archivePath, outputPath string) error {
 	defer func() { _ = gz.Close() }()
 
 	tr := tar.NewReader(gz)
+	nameSet := make(map[string]struct{}, len(binaryCandidates))
+	for _, name := range binaryCandidates {
+		name = filepath.Base(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		nameSet[name] = struct{}{}
+	}
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -240,7 +273,7 @@ func extractBinaryFromTarGz(archivePath, outputPath string) error {
 			continue
 		}
 		base := filepath.Base(h.Name)
-		if base == "hubfly" || base == "hubfly-cli" {
+		if _, ok := nameSet[base]; ok {
 			out, err := os.Create(outputPath)
 			if err != nil {
 				return err
@@ -259,15 +292,28 @@ func extractBinaryFromTarGz(archivePath, outputPath string) error {
 }
 
 func extractBinaryFromZip(archivePath, outputPath string) error {
+	return extractBinaryFromZipByNames(archivePath, outputPath, "hubfly.exe", "hubfly", "hubfly-cli")
+}
+
+func extractBinaryFromZipByNames(archivePath, outputPath string, binaryCandidates ...string) error {
 	zr, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = zr.Close() }()
 
+	nameSet := make(map[string]struct{}, len(binaryCandidates))
+	for _, name := range binaryCandidates {
+		name = filepath.Base(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		nameSet[name] = struct{}{}
+	}
+
 	for _, f := range zr.File {
 		base := filepath.Base(f.Name)
-		if base != "hubfly.exe" && base != "hubfly" {
+		if _, ok := nameSet[base]; !ok {
 			continue
 		}
 		rc, err := f.Open()
