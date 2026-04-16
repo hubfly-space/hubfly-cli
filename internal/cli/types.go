@@ -29,9 +29,12 @@ type user struct {
 }
 
 type region struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Location string `json:"location"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Location        string `json:"location"`
+	Available       bool   `json:"available"`
+	PrimaryIP       string `json:"primaryIP"`
+	PrimaryProvider string `json:"primaryProvider"`
 }
 
 type project struct {

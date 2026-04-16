@@ -41,6 +41,18 @@ func run(args []string) error {
 		return err
 	case "projects":
 		return projectsFlow()
+	case "deploy":
+		advanced := false
+		if len(args) == 2 {
+			if args[1] == "advanced" || args[1] == "--advanced" {
+				advanced = true
+			} else {
+				return errors.New("usage: hubfly deploy [advanced|--advanced]")
+			}
+		} else if len(args) > 2 {
+			return errors.New("usage: hubfly deploy [advanced|--advanced]")
+		}
+		return deployFlow(advanced)
 	case "tunnel":
 		if len(args) != 4 {
 			return errors.New("usage: hubfly tunnel <containerIdOrName> <localPort> <targetPort>")
@@ -76,6 +88,7 @@ func printUsage() {
 	fmt.Println("  hubfly [--debug] logout")
 	fmt.Println("  hubfly [--debug] whoami")
 	fmt.Println("  hubfly [--debug] projects")
+	fmt.Println("  hubfly [--debug] deploy [advanced|--advanced]")
 	fmt.Println("  hubfly [--debug] tunnel <containerIdOrName> <localPort> <targetPort>")
 	fmt.Println("  hubfly [--debug] version")
 	fmt.Println("  hubfly [--debug] update [--check]")

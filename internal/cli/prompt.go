@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -50,6 +51,35 @@ func promptNumberWithDefault(label string, defaultValue int) (int, error) {
 		}
 		value, convErr := strconv.Atoi(text)
 		if convErr != nil {
+			fmt.Println("Please enter a valid number.")
+			continue
+		}
+		return value, nil
+	}
+}
+
+func promptStringWithDefault(label, defaultValue string) (string, error) {
+	text, err := prompt(fmt.Sprintf("%s (default %s): ", label, defaultValue))
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(text) == "" {
+		return defaultValue, nil
+	}
+	return strings.TrimSpace(text), nil
+}
+
+func promptFloatWithDefault(label string, defaultValue float64) (float64, error) {
+	for {
+		text, err := prompt(fmt.Sprintf("%s (default %.2f): ", label, defaultValue))
+		if err != nil {
+			return 0, err
+		}
+		if strings.TrimSpace(text) == "" {
+			return defaultValue, nil
+		}
+		value, convErr := strconv.ParseFloat(strings.TrimSpace(text), 64)
+		if convErr != nil || math.IsNaN(value) || math.IsInf(value, 0) {
 			fmt.Println("Please enter a valid number.")
 			continue
 		}
