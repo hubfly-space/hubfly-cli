@@ -101,10 +101,11 @@ type deployConfigFile struct {
 	} `json:"deploy"`
 	Env      []deployEnvVar `json:"env,omitempty"`
 	Metadata struct {
-		BuilderVersion string `json:"builderVersion,omitempty"`
-		LastBuildID    string `json:"lastBuildId,omitempty"`
-		LastImageTag   string `json:"lastImageTag,omitempty"`
-		LastDeployedAt string `json:"lastDeployedAt,omitempty"`
+		BuilderVersion   string `json:"builderVersion,omitempty"`
+		LastBuildID      string `json:"lastBuildId,omitempty"`
+		LastImageTag     string `json:"lastImageTag,omitempty"`
+		LastImageDisplay string `json:"lastImageDisplay,omitempty"`
+		LastDeployedAt   string `json:"lastDeployedAt,omitempty"`
 	} `json:"metadata,omitempty"`
 }
 
@@ -243,7 +244,7 @@ type deploySessionStatusResponse struct {
 		ID               string `json:"id"`
 		Status           string `json:"status"`
 		Error            string `json:"error"`
-		ImageTag         string `json:"imageTag"`
+		ImageDisplay     string `json:"imageDisplay"`
 		StartedAt        string `json:"startedAt"`
 		FinishedAt       string `json:"finishedAt"`
 		CreatedAt        string `json:"createdAt"`
@@ -255,4 +256,39 @@ type deploySessionStatusResponse struct {
 		BoundContainerID string `json:"boundContainerId"`
 		BuilderVersion   string `json:"builderVersion"`
 	} `json:"build"`
+}
+
+type deployContainerSnapshotResponse struct {
+	Container struct {
+		ID                 string                 `json:"id"`
+		Name               string                 `json:"name"`
+		ProjectID          string                 `json:"projectId"`
+		ProjectName        string                 `json:"projectName"`
+		Status             string                 `json:"status"`
+		SourceType         string                 `json:"sourceType"`
+		SourceImageDisplay string                 `json:"sourceImageDisplay"`
+		ActualImageDisplay string                 `json:"actualImageDisplay"`
+		Resources          cliDeploymentResources `json:"resources"`
+		Runtime            cliDeploymentRuntime   `json:"runtime"`
+		Ports              []cliDeploymentPort    `json:"ports"`
+		Volumes            []struct {
+			ID               string `json:"id"`
+			Name             string `json:"name"`
+			DockerVolumeName string `json:"dockerVolumeName"`
+			MountPoint       string `json:"mountPoint"`
+		} `json:"volumes"`
+		Environment []struct {
+			ID       string `json:"id"`
+			Key      string `json:"key"`
+			IsSecret bool   `json:"isSecret"`
+		} `json:"environment"`
+		Process struct {
+			Command    []string `json:"command"`
+			Entrypoint []string `json:"entrypoint"`
+			WorkingDir string   `json:"workingDir"`
+		} `json:"process"`
+		RestartPolicy string                    `json:"restartPolicy"`
+		Healthcheck   *cliDeploymentHealthcheck `json:"healthcheck"`
+		Labels        map[string]string         `json:"labels"`
+	} `json:"container"`
 }

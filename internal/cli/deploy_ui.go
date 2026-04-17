@@ -195,6 +195,38 @@ func promptDeployReviewChoice(created bool) (bool, error) {
 	return promptYesNo("Review hubfly.build.json before build", created)
 }
 
+func promptCreateNewContainerInstead(containerID string) (bool, error) {
+	if canUseTUI() {
+		options := []listOption{
+			{
+				Title: "Create new container",
+				Desc:  "Clear the missing binding and continue this deploy as a fresh container",
+			},
+			{
+				Title: "Cancel deploy",
+				Desc:  "Stop now and keep the current hubfly.build.json binding untouched",
+			},
+		}
+		subtitle := fmt.Sprintf(
+			"Bound container %s is gone. Choose how this deploy should continue.",
+			containerID,
+		)
+		idx, cancelled, err := tuiPickOne("Missing Bound Container", subtitle, options)
+		if err != nil {
+			return false, err
+		}
+		if cancelled {
+			return false, errors.New("deployment cancelled")
+		}
+		return idx == 0, nil
+	}
+
+	return promptYesNo(
+		fmt.Sprintf("Bound container %s was not found. Create a new container instead", containerID),
+		true,
+	)
+}
+
 func selectProjectIndex(projects []project) (int, error) {
 	if canUseTUI() {
 		options := []listOption{{

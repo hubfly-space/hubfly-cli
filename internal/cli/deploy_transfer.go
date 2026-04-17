@@ -51,6 +51,10 @@ func (p *uploadProgress) Wrap(reader io.ReadCloser) io.ReadCloser {
 	return &progressReadCloser{reader: reader, bytes: &p.bytes}
 }
 
+func (p *uploadProgress) SetCurrent(value int64) {
+	p.bytes.Store(value)
+}
+
 func (p *uploadProgress) Start() {
 	go func() {
 		ticker := time.NewTicker(150 * time.Millisecond)
