@@ -42,17 +42,13 @@ func run(args []string) error {
 	case "projects":
 		return projectsFlow()
 	case "deploy":
-		advanced := false
-		if len(args) == 2 {
-			if args[1] == "advanced" || args[1] == "--advanced" {
-				advanced = true
-			} else {
-				return errors.New("usage: hubfly deploy [advanced|--advanced]")
-			}
-		} else if len(args) > 2 {
-			return errors.New("usage: hubfly deploy [advanced|--advanced]")
+		opts, err := parseDeployOptions(args[1:])
+		if err != nil {
+			return err
 		}
-		return deployFlow(advanced)
+		return deployFlowWithOptions(opts)
+	case "build":
+		return runBuildCommand(args[1:])
 	case "tunnel":
 		if len(args) != 4 {
 			return errors.New("usage: hubfly tunnel <containerIdOrName> <localPort> <targetPort>")
@@ -88,11 +84,23 @@ func printUsage() {
 	fmt.Println("  hubfly [--debug] logout")
 	fmt.Println("  hubfly [--debug] whoami")
 	fmt.Println("  hubfly [--debug] projects")
-	fmt.Println("  hubfly [--debug] deploy [advanced|--advanced]")
+	fmt.Println("  hubfly [--debug] deploy [advanced|--advanced] [--project <id|name|new>] [--region <region>] [--yes]")
+	fmt.Println("       [--config <path>] [--detach] [--dockerfile <path>] [--builder-version <tag>]")
+	fmt.Println("  hubfly [--debug] build <init|validate|edit|explain>")
 	fmt.Println("  hubfly [--debug] tunnel <containerIdOrName> <localPort> <targetPort>")
 	fmt.Println("  hubfly [--debug] version")
 	fmt.Println("  hubfly [--debug] update [--check]")
 	fmt.Println("  hubfly service [--port <port>]")
+	fmt.Println("")
+	fmt.Println("Deploy examples:")
+	fmt.Println("  hubfly deploy")
+	fmt.Println("  hubfly deploy --project new --region rw-kigali-1 --yes")
+	fmt.Println("  hubfly deploy --project my-api --dockerfile ./deploy/Dockerfile --builder-version v1.7.1")
+	fmt.Println("")
+	fmt.Println("Build config helpers:")
+	fmt.Println("  hubfly build init")
+	fmt.Println("  hubfly build validate --config ./hubfly.build.json")
+	fmt.Println("  hubfly build explain --json")
 	fmt.Println("")
 	fmt.Println("Debug mode:")
 	fmt.Println("  --debug")
