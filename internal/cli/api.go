@@ -70,6 +70,18 @@ func fetchDeploySession(token, buildID string) (deploySessionStatusResponse, err
 	return payload, err
 }
 
+func fetchDeployContainerSnapshot(token, containerID string) (deployContainerSnapshotResponse, error) {
+	var payload deployContainerSnapshotResponse
+	err := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/cli/deploy/containers/"+containerID,
+		token,
+		nil,
+		&payload,
+	)
+	return payload, err
+}
+
 func reportDeployCallback(buildID, status, uploadToken, errorMessage string) error {
 	body := map[string]string{
 		"id":          buildID,
@@ -133,6 +145,16 @@ func doJSONRequest(method, url, token string, body any, out any) error {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg := strings.TrimSpace(string(respBytes))
+		if len(respBytes) > 0 {
+			var apiPayload map[string]any
+			if err := json.Unmarshal(respBytes, &apiPayload); err == nil {
+				if apiErrorMessage, ok := apiPayload["error"].(string); ok && strings.TrimSpace(apiErrorMessage) != "" {
+					msg = strings.TrimSpace(apiErrorMessage)
+				} else if message, ok := apiPayload["message"].(string); ok && strings.TrimSpace(message) != "" {
+					msg = strings.TrimSpace(message)
+				}
+			}
+		}
 		if msg == "" {
 			msg = "request failed"
 		}

@@ -24,6 +24,8 @@ hubfly version
 - Persistent Bubble Tea TUI for project/container/tunnel workflow (`projects`)
 - Single and multiple tunnel connect flows
 - Local tunnel status screens while sessions are active
+- Local `hubfly deploy` flow with reusable `hubfly-builder`, `hubfly.build.json`, deploy diffs, and resumable image uploads
+- Build config helpers: `hubfly build init|validate|edit|explain`
 - Debug mode for API requests/responses (`--debug` or `HUBFLY_DEBUG=1`)
 - Built-in version and self-update commands
 - Tunnel service mode (`service`)
@@ -35,6 +37,12 @@ hubfly login [--token <TOKEN>]
 hubfly logout
 hubfly whoami
 hubfly projects
+hubfly deploy [advanced|--advanced] [--project <id|name|new>] [--region <region>] [--yes]
+              [--config <path>] [--detach] [--dockerfile <path>] [--builder-version <tag>]
+hubfly build init [--config <path>] [--dockerfile <path>] [--force] [--print]
+hubfly build validate [--config <path>] [--dockerfile <path>] [--builder-version <tag>] [--json]
+hubfly build edit [--config <path>]
+hubfly build explain [--config <path>] [--dockerfile <path>] [--builder-version <tag>] [--json]
 hubfly tunnel <containerIdOrName> <localPort> <targetPort>
 hubfly version
 hubfly update --check
@@ -66,6 +74,65 @@ Multi-tunnel selection:
 `hubfly update --check` checks latest release.
 
 `hubfly update` downloads the latest release for your OS/arch and replaces the local binary (Linux/macOS).
+
+## Deploying Apps
+
+`hubfly deploy` works directly from your project directory. The CLI:
+
+- creates or reuses `hubfly.build.json`
+- reuses a cached `hubfly-builder` unless a newer or pinned version is needed
+- runs builder inspection for auto-detected stacks
+- builds the Docker image locally on your machine
+- uploads a compressed image archive to the regional builder with retryable chunk uploads
+- waits for the deploy by default, or returns early with `--detach`
+
+Common examples:
+
+```bash
+hubfly deploy
+hubfly deploy advanced
+hubfly deploy --project new --region rw-kigali-1 --yes
+hubfly deploy --project my-api --dockerfile ./deploy/Dockerfile --yes
+hubfly deploy --config ./ops/hubfly.build.json --builder-version v1.7.1 --yes
+```
+
+Important flags:
+
+- `--project`: existing project id/name, or `new`
+- `--region`: required for non-interactive new-project deploys
+- `--yes`: required in non-interactive/scripted deploys after reviewing the diff
+- `--config`: custom `hubfly.build.json` path or project directory
+- `--detach`: stop after upload and let Hubfly finish the deploy asynchronously
+- `--dockerfile`: force Dockerfile mode for this run
+- `--builder-version`: pin a specific `hubfly-builder` release
+
+Before deploy, the CLI shows a diff for:
+
+- image source
+- resources
+- ports
+- volumes
+- runtime environment variables
+- healthcheck
+- bound-container replacement behavior
+
+## Build Config Tooling
+
+`hubfly deploy` does not require any manual setup, but the build helpers are useful when you want to inspect or adjust the config explicitly.
+
+```bash
+hubfly build init
+hubfly build validate
+hubfly build edit
+hubfly build explain
+```
+
+What they do:
+
+- `hubfly build init`: create or refresh `hubfly.build.json`
+- `hubfly build validate`: resolve the effective build plan and verify Dockerfile/builder inputs
+- `hubfly build edit`: open `hubfly.build.json` in `$EDITOR`
+- `hubfly build explain`: show what `hubfly-builder` detected and why
 
 ## Debug and logs
 

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,45 +22,36 @@ const (
 type builderInstallState struct {
 	Version   string `json:"version,omitempty"`
 	Source    string `json:"source,omitempty"`
+	Checksum  string `json:"checksum,omitempty"`
 	UpdatedAt string `json:"updatedAt,omitempty"`
 }
 
 func deployFlow(forceAdvanced bool) error {
+	return deployFlowWithOptions(deployOptions{Advanced: forceAdvanced})
+}
+
+func deployFlowWithOptions(opts deployOptions) error {
 	token, err := ensureAuth(true)
 	if err != nil {
 		return err
 	}
 
-	projectDir, err := os.Getwd()
+	projectDir, cfgPath, err := resolveDeployWorkspace(opts.ConfigPath)
 	if err != nil {
 		return err
 	}
 
 	printDeployHeader(projectDir)
 
-	cfgPath := deployConfigPath(projectDir)
-	cfg, created, err := loadOrInitDeployConfig(projectDir)
+	cfg, created, err := loadOrInitDeployConfigAt(projectDir, cfgPath)
 	if err != nil {
 		return err
 	}
+	normalizeDeployConfig(&cfg, projectDir)
+	applyDeployOverrides(&cfg, opts)
 
-	prepared, err := prepareDeployBuild(projectDir, cfgPath, &cfg)
-	if err != nil {
-		return err
-	}
-	if err := ensureDeployProjectBinding(token, projectDir, &cfg); err != nil {
-		return err
-	}
-	cfg.Metadata.BuilderVersion = prepared.BuilderVersion
-	if err := saveDeployConfig(cfgPath, cfg); err != nil {
-		return err
-	}
-
-	printDeploySummary(projectDir, cfg, prepared)
-	printDeployWarnings("Builder warnings", prepared.Warnings)
-
-	editConfig := forceAdvanced
-	if !forceAdvanced {
+	editConfig := opts.Advanced
+	if !opts.Advanced && !opts.AutoApprove && isInteractiveShell() {
 		editConfig, err = promptDeployReviewChoice(created)
 		if err != nil {
 			return err
@@ -72,36 +62,51 @@ func deployFlow(forceAdvanced bool) error {
 		if err := openDeployConfigEditor(cfgPath); err != nil {
 			return err
 		}
-		cfg, _, err = loadOrInitDeployConfig(projectDir)
+		cfg, _, err = loadOrInitDeployConfigAt(projectDir, cfgPath)
 		if err != nil {
 			return err
 		}
-		prepared, err = prepareDeployBuild(projectDir, cfgPath, &cfg)
-		if err != nil {
-			return err
-		}
-		if err := ensureDeployProjectBinding(token, projectDir, &cfg); err != nil {
-			return err
-		}
-		cfg.Metadata.BuilderVersion = prepared.BuilderVersion
-		if err := saveDeployConfig(cfgPath, cfg); err != nil {
-			return err
-		}
-		printDeploySummary(projectDir, cfg, prepared)
-		printDeployWarnings("Builder warnings", prepared.Warnings)
+		normalizeDeployConfig(&cfg, projectDir)
+		applyDeployOverrides(&cfg, opts)
+	}
+
+	prepared, err := prepareDeployBuild(projectDir, cfgPath, &cfg, opts.BuilderVersion)
+	if err != nil {
+		return err
+	}
+	if err := ensureDeployProjectBinding(token, projectDir, &cfg, opts); err != nil {
+		return err
+	}
+	cfg.Metadata.BuilderVersion = prepared.BuilderVersion
+	if err := saveDeployConfig(cfgPath, cfg); err != nil {
+		return err
+	}
+
+	current, err := loadBoundContainerSnapshot(token, &cfg)
+	if err != nil {
+		return err
+	}
+
+	printDeploySummary(projectDir, cfg, prepared)
+	printDeployWarnings("Builder warnings", prepared.Warnings)
+	diffPlan := buildDeployDiffPlan(projectDir, cfg, prepared, current)
+	printDeployDiffPlan(diffPlan)
+	if err := confirmDeployPlan(opts, diffPlan); err != nil {
+		return err
 	}
 
 	deploymentConfig := buildDeploymentConfig(cfg)
-	session, err := createDeploySession(token, createDeploySessionRequest{
+	session, err := createDeploySessionWithMissingBoundFallback(token, cfgPath, &cfg, createDeploySessionRequest{
 		BuilderVersion:   prepared.BuilderVersion,
 		BoundContainerID: strings.TrimSpace(cfg.Container.ID),
 		Config:           deploymentConfig,
-	})
+	}, opts)
 	if err != nil {
 		return err
 	}
 
 	localTag := generateLocalImageTag(session.BuildID)
+	fmt.Printf("Deploy build id: %s\n", session.BuildID)
 	printDeployStep(
 		"Local build",
 		fmt.Sprintf("docker build using %s", displayDeployBuildSource(projectDir, prepared)),
@@ -133,6 +138,20 @@ func deployFlow(forceAdvanced bool) error {
 		return err
 	}
 
+	cfg.Metadata.BuilderVersion = prepared.BuilderVersion
+	cfg.Metadata.LastBuildID = session.BuildID
+	if err := saveDeployConfig(cfgPath, cfg); err != nil {
+		return err
+	}
+
+	if opts.Detach {
+		fmt.Printf("Upload finished. Deployment is continuing in Hubfly.\n")
+		fmt.Printf("Project:   %s (%s)\n", session.ProjectName, session.ProjectID)
+		fmt.Printf("Build ID:  %s\n", session.BuildID)
+		fmt.Printf("Config:    %s\n", cfgPath)
+		return nil
+	}
+
 	status, err := waitForDeploySession(token, session.BuildID)
 	if err != nil {
 		return err
@@ -152,7 +171,7 @@ func deployFlow(forceAdvanced bool) error {
 	cfg.Project.Region = status.Build.RegionID
 	cfg.Metadata.BuilderVersion = prepared.BuilderVersion
 	cfg.Metadata.LastBuildID = status.Build.ID
-	cfg.Metadata.LastImageTag = status.Build.ImageTag
+	cfg.Metadata.LastImageDisplay = status.Build.ImageDisplay
 	cfg.Metadata.LastDeployedAt = time.Now().UTC().Format(time.RFC3339)
 	if err := saveDeployConfig(cfgPath, cfg); err != nil {
 		return err
@@ -161,12 +180,95 @@ func deployFlow(forceAdvanced bool) error {
 	fmt.Printf("Deployment succeeded.\n")
 	fmt.Printf("Project:   %s (%s)\n", status.Build.ProjectName, status.Build.ProjectID)
 	fmt.Printf("Container: %s (%s)\n", cfg.Container.Name, cfg.Container.ID)
-	fmt.Printf("Image:     %s\n", status.Build.ImageTag)
+	fmt.Printf("Image:     %s\n", displayDeployValue(status.Build.ImageDisplay, "Managed by Hubfly"))
 	fmt.Printf("Config:    %s\n", cfgPath)
 	return nil
 }
 
-func prepareDeployBuild(projectDir, cfgPath string, cfg *deployConfigFile) (deployPreparedBuild, error) {
+func applyDeployOverrides(cfg *deployConfigFile, opts deployOptions) {
+	if strings.TrimSpace(opts.DockerfilePath) != "" {
+		cfg.Build.Mode = "dockerfile"
+		cfg.Build.DockerfilePath = strings.TrimSpace(opts.DockerfilePath)
+	}
+}
+
+func loadBoundContainerSnapshot(token string, cfg *deployConfigFile) (*deployContainerSnapshotResponse, error) {
+	containerID := strings.TrimSpace(cfg.Container.ID)
+	if containerID == "" {
+		return nil, nil
+	}
+
+	snapshot, err := fetchDeployContainerSnapshot(token, containerID)
+	if err != nil {
+		if apiErr, ok := err.(*apiError); ok && apiErr.Status == http.StatusNotFound {
+			fmt.Fprintf(
+				os.Stderr,
+				"Warning: bound container %s no longer exists. The next deploy will create a new container.\n",
+				containerID,
+			)
+			cfg.Container.ID = ""
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
+func createDeploySessionWithMissingBoundFallback(
+	token, cfgPath string,
+	cfg *deployConfigFile,
+	req createDeploySessionRequest,
+	opts deployOptions,
+) (deploySessionResponse, error) {
+	session, err := createDeploySession(token, req)
+	if !isMissingBoundContainerError(err) || strings.TrimSpace(cfg.Container.ID) == "" {
+		return session, err
+	}
+
+	missingContainerID := strings.TrimSpace(cfg.Container.ID)
+	shouldCreateNew := opts.AutoApprove
+	if !shouldCreateNew {
+		if !isInteractiveShell() {
+			return deploySessionResponse{}, fmt.Errorf(
+				"bound container %s was not found; rerun with --yes to clear it and create a new container",
+				missingContainerID,
+			)
+		}
+
+		var promptErr error
+		shouldCreateNew, promptErr = promptCreateNewContainerInstead(missingContainerID)
+		if promptErr != nil {
+			return deploySessionResponse{}, promptErr
+		}
+		if !shouldCreateNew {
+			return deploySessionResponse{}, fmt.Errorf("deployment cancelled")
+		}
+	}
+
+	fmt.Fprintf(
+		os.Stderr,
+		"Bound container %s was not found. Retrying this deploy as a new container.\n",
+		missingContainerID,
+	)
+	cfg.Container.ID = ""
+	if err := saveDeployConfig(cfgPath, *cfg); err != nil {
+		return deploySessionResponse{}, err
+	}
+
+	req.BoundContainerID = ""
+	return createDeploySession(token, req)
+}
+
+func isMissingBoundContainerError(err error) bool {
+	apiErr, ok := err.(*apiError)
+	if !ok || apiErr.Status != http.StatusNotFound {
+		return false
+	}
+
+	return strings.Contains(apiErr.Message, "Bound container not found in this project.")
+}
+
+func prepareDeployBuild(projectDir, cfgPath string, cfg *deployConfigFile, requestedBuilderVersion string) (deployPreparedBuild, error) {
 	if hasCustomDockerfileConfig(*cfg) {
 		dockerfilePath, err := resolveConfiguredDockerfilePath(projectDir, *cfg)
 		if err != nil {
@@ -191,7 +293,9 @@ func prepareDeployBuild(projectDir, cfgPath string, cfg *deployConfigFile) (depl
 		}, nil
 	}
 
-	builderPath, builderVersion, err := ensureLocalBuilderBinary()
+	builderPath, builderVersion, err := ensureLocalBuilderBinary(builderInstallRequest{
+		RequestedVersion: requestedBuilderVersion,
+	})
 	if err != nil {
 		return deployPreparedBuild{}, err
 	}
@@ -295,10 +399,33 @@ func wrapBuilderInspectError(projectDir string, cfg deployConfigFile, cause erro
 	)
 }
 
-func ensureDeployProjectBinding(token, projectDir string, cfg *deployConfigFile) error {
+func ensureDeployProjectBinding(token, projectDir string, cfg *deployConfigFile, opts deployOptions) error {
 	projects, err := fetchProjects(token)
 	if err != nil {
 		return err
+	}
+
+	requestedProject := strings.TrimSpace(opts.Project)
+	if requestedProject != "" {
+		if strings.EqualFold(requestedProject, "new") {
+			return createProjectBinding(token, projectDir, cfg, opts, "")
+		}
+		if matched, ok := resolveRequestedProject(projects, requestedProject); ok {
+			if regionOverride := strings.TrimSpace(opts.Region); regionOverride != "" &&
+				!regionMatchesQuery(matched.Region, regionOverride) {
+				return fmt.Errorf(
+					"project %s is in region %s, not %s",
+					matched.Name,
+					matched.Region.Name,
+					regionOverride,
+				)
+			}
+			cfg.Project.ID = matched.ID
+			cfg.Project.Name = matched.Name
+			cfg.Project.Region = matched.Region.ID
+			return nil
+		}
+		return createProjectBinding(token, projectDir, cfg, opts, requestedProject)
 	}
 
 	projectID := strings.TrimSpace(cfg.Project.ID)
@@ -315,7 +442,11 @@ func ensureDeployProjectBinding(token, projectDir string, cfg *deployConfigFile)
 	}
 
 	if len(projects) == 0 {
-		return createProjectBinding(token, projectDir, cfg)
+		return createProjectBinding(token, projectDir, cfg, opts, "")
+	}
+
+	if !isInteractiveShell() {
+		return createProjectBinding(token, projectDir, cfg, opts, "")
 	}
 
 	selection, err := selectProjectIndex(projects)
@@ -324,7 +455,7 @@ func ensureDeployProjectBinding(token, projectDir string, cfg *deployConfigFile)
 	}
 
 	if selection == 1 {
-		return createProjectBinding(token, projectDir, cfg)
+		return createProjectBinding(token, projectDir, cfg, opts, "")
 	}
 
 	selected := projects[selection-2]
@@ -334,7 +465,7 @@ func ensureDeployProjectBinding(token, projectDir string, cfg *deployConfigFile)
 	return nil
 }
 
-func createProjectBinding(token, projectDir string, cfg *deployConfigFile) error {
+func createProjectBinding(token, projectDir string, cfg *deployConfigFile, opts deployOptions, requestedName string) error {
 	regions, err := fetchRegions(token)
 	if err != nil {
 		return err
@@ -353,20 +484,22 @@ func createProjectBinding(token, projectDir string, cfg *deployConfigFile) error
 		return fmt.Errorf("no regions available")
 	}
 
-	projectName, err := promptStringWithDefault(
-		"Project name",
-		defaultProjectName(projectDir, cfg.Project.Name),
-	)
+	projectName := strings.TrimSpace(requestedName)
+	if projectName == "" {
+		projectName = defaultProjectName(projectDir, cfg.Project.Name)
+	}
+	if isInteractiveShell() && strings.TrimSpace(requestedName) == "" && !opts.AutoApprove {
+		projectName, err = promptStringWithDefault("Project name", projectName)
+		if err != nil {
+			return err
+		}
+	}
+
+	selectedRegion, err := resolveDeployRegion(availableRegions, strings.TrimSpace(opts.Region), strings.TrimSpace(cfg.Project.Region))
 	if err != nil {
 		return err
 	}
 
-	selection, err := selectRegionIndex(availableRegions)
-	if err != nil {
-		return err
-	}
-
-	selectedRegion := availableRegions[selection-1]
 	createdProject, err := createProjectForDeploy(token, projectName, selectedRegion.ID)
 	if err != nil {
 		return err
@@ -376,6 +509,62 @@ func createProjectBinding(token, projectDir string, cfg *deployConfigFile) error
 	cfg.Project.Name = createdProject.Name
 	cfg.Project.Region = createdProject.Region.ID
 	return nil
+}
+
+func resolveRequestedProject(projects []project, query string) (project, bool) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return project{}, false
+	}
+	lower := strings.ToLower(query)
+	for _, candidate := range projects {
+		if candidate.ID == query || strings.EqualFold(candidate.Name, query) {
+			return candidate, true
+		}
+		if strings.ToLower(strings.TrimSpace(candidate.Name)) == lower {
+			return candidate, true
+		}
+	}
+	return project{}, false
+}
+
+func resolveDeployRegion(availableRegions []region, requested, fallback string) (region, error) {
+	if regionQuery := strings.TrimSpace(requested); regionQuery != "" {
+		for _, candidate := range availableRegions {
+			if regionMatchesQuery(candidate, regionQuery) {
+				return candidate, nil
+			}
+		}
+		return region{}, fmt.Errorf("region %q is not available for deploy", regionQuery)
+	}
+
+	if regionQuery := strings.TrimSpace(fallback); regionQuery != "" {
+		for _, candidate := range availableRegions {
+			if regionMatchesQuery(candidate, regionQuery) {
+				return candidate, nil
+			}
+		}
+	}
+
+	if !isInteractiveShell() {
+		return region{}, fmt.Errorf("region is required in non-interactive mode. Pass --region <region-id>")
+	}
+
+	selection, err := selectRegionIndex(availableRegions)
+	if err != nil {
+		return region{}, err
+	}
+	return availableRegions[selection-1], nil
+}
+
+func regionMatchesQuery(candidate region, query string) bool {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return false
+	}
+	return candidate.ID == query ||
+		strings.EqualFold(candidate.Name, query) ||
+		strings.EqualFold(candidate.Location, query)
 }
 
 func promptMenuSelection(label string, max, defaultValue int) (int, error) {
@@ -400,35 +589,40 @@ func defaultProjectName(projectDir, current string) string {
 	return filepath.Base(projectDir)
 }
 
-func ensureLocalBuilderBinary() (string, string, error) {
+func ensureLocalBuilderBinary(request builderInstallRequest) (string, string, error) {
 	targetPath := builderBinaryPath()
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return "", "", err
 	}
+	requestedVersion := normalizeVersion(request.RequestedVersion)
 
 	downloadURL := strings.TrimSpace(os.Getenv("HUBFLY_BUILDER_URL"))
 	if downloadURL != "" {
 		sourceKey := builderInstallSourceForURL(downloadURL)
 		if path, version, ok := reuseInstalledBuilder(targetPath, sourceKey, ""); ok {
+			fmt.Printf("Using hubfly-builder %s\n", version)
 			return path, version, nil
 		}
+		fmt.Printf("Downloading hubfly-builder from %s\n", downloadURL)
 		version, err := installBuilderFromURL(targetPath, downloadURL)
 		if err != nil {
-			return cachedBuilderOrError(targetPath, err)
+			return cachedBuilderOrVersionError(targetPath, requestedVersion, err)
 		}
 		_ = saveBuilderInstallState(builderInstallState{
 			Version:   version,
 			Source:    sourceKey,
 			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 		})
+		fmt.Printf("Using hubfly-builder %s (downloaded now)\n", version)
 		return targetPath, version, nil
 	}
 
-	release, err := fetchLatestReleaseForRepo(builderRepoOwner, builderRepoName)
+	release, _, err := fetchBuilderReleaseCached(request.RequestedVersion)
 	if err != nil {
-		return cachedBuilderOrError(
+		return cachedBuilderOrVersionError(
 			targetPath,
-			fmt.Errorf("failed to fetch latest hubfly-builder release: %w", err),
+			requestedVersion,
+			fmt.Errorf("failed to fetch hubfly-builder release metadata: %w", err),
 		)
 	}
 
@@ -439,18 +633,16 @@ func ensureLocalBuilderBinary() (string, string, error) {
 
 	sourceKey := builderInstallSourceForRelease(release.TagName, assetName)
 	if path, version, ok := reuseInstalledBuilder(targetPath, sourceKey, release.TagName); ok {
+		fmt.Printf("Using hubfly-builder %s\n", version)
 		return path, version, nil
 	}
 
-	assetURL, err := findBuilderAssetURL(release, assetName)
+	fmt.Printf("Downloading hubfly-builder %s for %s/%s\n", release.TagName, runtime.GOOS, runtime.GOARCH)
+	version, err := installBuilderFromRelease(targetPath, release, assetName)
 	if err != nil {
-		return cachedBuilderOrError(targetPath, err)
-	}
-
-	version, err := installBuilderFromURL(targetPath, assetURL)
-	if err != nil {
-		return cachedBuilderOrError(
+		return cachedBuilderOrVersionError(
 			targetPath,
+			requestedVersion,
 			fmt.Errorf("failed to install hubfly-builder %s for %s/%s: %w", release.TagName, runtime.GOOS, runtime.GOARCH, err),
 		)
 	}
@@ -462,11 +654,12 @@ func ensureLocalBuilderBinary() (string, string, error) {
 		Source:    sourceKey,
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	})
+	fmt.Printf("Using hubfly-builder %s (downloaded now)\n", version)
 	return targetPath, version, nil
 }
 
 func reuseInstalledBuilder(targetPath, sourceKey, expectedVersion string) (string, string, bool) {
-	version, err := localBuilderVersion(targetPath)
+	version, err := probeBuilderVersion(targetPath)
 	if err != nil {
 		return "", "", false
 	}
@@ -786,51 +979,17 @@ func writeBuildSecretFiles(envVars []deployEnvVar) (map[string]string, func(), e
 }
 
 func uploadLocalImage(localTag string, session deploySessionResponse) error {
-	cmd := exec.Command("docker", "save", localTag)
-	stdout, err := cmd.StdoutPipe()
+	printDeployStep(
+		"Upload archive",
+		"Compressing the local Docker image before transfer",
+	)
+	archivePath, archiveSize, cleanup, err := exportCompressedImageArchive(localTag)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	progress := newUploadProgress("Upload progress", estimateLocalImageSize(localTag))
-	req, err := http.NewRequest(http.MethodPost, session.Upload.URL, progress.Wrap(stdout))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-tar")
-	req.Header.Set("X-Hubfly-Build-Id", session.BuildID)
-	req.Header.Set("X-Hubfly-Upload-Token", session.Upload.Token)
-	req.Header.Set("X-Hubfly-Source-Image", localTag)
-
-	client := &http.Client{}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	progress.Start()
-	defer progress.Finish()
-
-	resp, requestErr := client.Do(req)
-	waitErr := cmd.Wait()
-
-	if requestErr != nil {
-		if waitErr != nil {
-			return fmt.Errorf("%w; docker save: %s", requestErr, strings.TrimSpace(stderr.String()))
-		}
-		return requestErr
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if waitErr != nil {
-		return fmt.Errorf("docker save failed: %s", strings.TrimSpace(stderr.String()))
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("upload failed with %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	return nil
+	return uploadChunkedImageArchive(archivePath, archiveSize, session, localTag)
 }
 
 func estimateLocalImageSize(localTag string) int64 {
@@ -912,8 +1071,15 @@ func installBuilderFromURL(targetPath, downloadURL string) (string, error) {
 }
 
 func cachedBuilderOrError(targetPath string, cause error) (string, string, error) {
-	version, cachedErr := localBuilderVersion(targetPath)
+	return cachedBuilderOrVersionError(targetPath, "", cause)
+}
+
+func cachedBuilderOrVersionError(targetPath, requestedVersion string, cause error) (string, string, error) {
+	version, cachedErr := probeBuilderVersion(targetPath)
 	if cachedErr != nil {
+		return "", "", cause
+	}
+	if requestedVersion != "" && !builderVersionsMatch(version, requestedVersion) {
 		return "", "", cause
 	}
 
@@ -928,18 +1094,7 @@ func cachedBuilderOrError(targetPath string, cause error) (string, string, error
 }
 
 func localBuilderVersion(targetPath string) (string, error) {
-	if _, err := os.Stat(targetPath); err != nil {
-		return "", err
-	}
-	version, err := commandOutput(exec.Command(targetPath, "version"))
-	if err != nil {
-		return "unknown", nil
-	}
-	version = strings.TrimSpace(version)
-	if version == "" {
-		version = "unknown"
-	}
-	return version, nil
+	return probeBuilderVersion(targetPath)
 }
 
 func builderBinaryCandidates() []string {
