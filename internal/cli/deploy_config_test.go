@@ -55,3 +55,42 @@ func TestBuilderVersionsMatch(t *testing.T) {
 		t.Fatalf("expected version mismatch")
 	}
 }
+
+func TestNormalizeDeployConfigLocksSharedTier(t *testing.T) {
+	projectDir := t.TempDir()
+	cfg := defaultDeployConfig(projectDir)
+	cfg.Deploy.Tier = "shared"
+	cfg.Deploy.Resources.CPU = 2
+	cfg.Deploy.Resources.RAM = 4096
+	cfg.Deploy.Resources.Storage = 20
+	cfg.Deploy.Resources.MaxCPU = 4
+	cfg.Deploy.Resources.MaxRAM = 8192
+	cfg.Deploy.Runtime.AutoSleep = false
+	cfg.Deploy.Runtime.AutoScale = true
+	cfg.Deploy.Runtime.Is24x7 = true
+	cfg.Deploy.Runtime.AutoScaleMode = "vertical"
+
+	normalizeDeployConfig(&cfg, projectDir)
+
+	if cfg.Deploy.Resources.CPU != 0.3 || cfg.Deploy.Resources.RAM != 256 || cfg.Deploy.Resources.Storage != 1 {
+		t.Fatalf("expected shared tier resources to be locked, got %+v", cfg.Deploy.Resources)
+	}
+	if cfg.Deploy.Resources.MaxCPU != 0 || cfg.Deploy.Resources.MaxRAM != 0 {
+		t.Fatalf("expected shared tier max resources to be cleared, got %+v", cfg.Deploy.Resources)
+	}
+	if !cfg.Deploy.Runtime.AutoSleep || cfg.Deploy.Runtime.AutoScale || cfg.Deploy.Runtime.Is24x7 {
+		t.Fatalf("expected shared tier runtime to be locked, got %+v", cfg.Deploy.Runtime)
+	}
+}
+
+func TestNormalizeDeployConfigDefaultsUnknownTierToDedicated(t *testing.T) {
+	projectDir := t.TempDir()
+	cfg := defaultDeployConfig(projectDir)
+	cfg.Deploy.Tier = "enterprise-ultra"
+
+	normalizeDeployConfig(&cfg, projectDir)
+
+	if cfg.Deploy.Tier != "dedicated" {
+		t.Fatalf("expected unknown tier to normalize to dedicated, got %q", cfg.Deploy.Tier)
+	}
+}

@@ -17,6 +17,36 @@ func deployConfigPath(projectDir string) string {
 	return filepath.Join(projectDir, deployConfigFileName)
 }
 
+func resolveDeployWorkspace(configInput string) (string, string, error) {
+	if strings.TrimSpace(configInput) == "" {
+		projectDir, err := os.Getwd()
+		if err != nil {
+			return "", "", err
+		}
+		return projectDir, deployConfigPath(projectDir), nil
+	}
+
+	resolved := strings.TrimSpace(configInput)
+	if !filepath.IsAbs(resolved) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", "", err
+		}
+		resolved = filepath.Join(cwd, resolved)
+	}
+
+	resolved, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", "", err
+	}
+
+	if info, statErr := os.Stat(resolved); statErr == nil && info.IsDir() {
+		return resolved, deployConfigPath(resolved), nil
+	}
+
+	return filepath.Dir(resolved), resolved, nil
+}
+
 func generatedDockerfilePath(projectDir string) string {
 	return filepath.Join(projectDir, ".hubfly", "Dockerfile.generated")
 }
@@ -33,8 +63,15 @@ func builderInstallStatePath() string {
 	return filepath.Join(hubflyDir(), "tools", "hubfly-builder.json")
 }
 
+func builderReleaseCachePath() string {
+	return filepath.Join(hubflyDir(), "tools", "hubfly-builder-release-cache.json")
+}
+
 func loadOrInitDeployConfig(projectDir string) (deployConfigFile, bool, error) {
-	path := deployConfigPath(projectDir)
+	return loadOrInitDeployConfigAt(projectDir, deployConfigPath(projectDir))
+}
+
+func loadOrInitDeployConfigAt(projectDir, path string) (deployConfigFile, bool, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -56,6 +93,9 @@ func loadOrInitDeployConfig(projectDir string) (deployConfigFile, bool, error) {
 }
 
 func saveDeployConfig(path string, cfg deployConfigFile) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	payload, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -128,6 +168,7 @@ func normalizeDeployConfig(cfg *deployConfigFile, projectDir string) {
 	if strings.TrimSpace(cfg.Deploy.Tier) == "" {
 		cfg.Deploy.Tier = defaults.Deploy.Tier
 	}
+	cfg.Deploy.Tier = normalizeDeployTier(cfg.Deploy.Tier)
 	if cfg.Deploy.Resources.CPU <= 0 {
 		cfg.Deploy.Resources.CPU = defaults.Deploy.Resources.CPU
 	}
@@ -146,10 +187,57 @@ func normalizeDeployConfig(cfg *deployConfigFile, projectDir string) {
 	if cfg.Deploy.Labels == nil {
 		cfg.Deploy.Labels = map[string]string{}
 	}
+	applyDeployTierConstraints(cfg)
 
 	for idx := range cfg.Env {
 		cfg.Env[idx].Name = strings.TrimSpace(cfg.Env[idx].Name)
 		cfg.Env[idx].Scope = normalizeEnvScope(cfg.Env[idx].Scope)
+	}
+}
+
+func normalizeDeployTier(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "shared":
+		return "shared"
+	default:
+		return "dedicated"
+	}
+}
+
+func applyDeployTierConstraints(cfg *deployConfigFile) {
+	if cfg.Deploy.Tier == "shared" {
+		cfg.Deploy.Resources.CPU = 0.3
+		cfg.Deploy.Resources.RAM = 256
+		cfg.Deploy.Resources.Storage = 1
+		cfg.Deploy.Resources.MaxCPU = 0
+		cfg.Deploy.Resources.MaxRAM = 0
+		cfg.Deploy.Runtime.AutoSleep = true
+		cfg.Deploy.Runtime.AutoScale = false
+		cfg.Deploy.Runtime.Is24x7 = false
+		cfg.Deploy.Runtime.AutoScaleMode = ""
+		return
+	}
+
+	if cfg.Deploy.Runtime.AutoSleep {
+		cfg.Deploy.Runtime.AutoScale = false
+		cfg.Deploy.Runtime.Is24x7 = false
+	}
+	if cfg.Deploy.Runtime.AutoScale {
+		cfg.Deploy.Runtime.AutoSleep = false
+		cfg.Deploy.Runtime.Is24x7 = true
+		if strings.TrimSpace(cfg.Deploy.Runtime.AutoScaleMode) == "" {
+			cfg.Deploy.Runtime.AutoScaleMode = "vertical"
+		}
+		if cfg.Deploy.Resources.MaxCPU > 0 && cfg.Deploy.Resources.MaxCPU < cfg.Deploy.Resources.CPU {
+			cfg.Deploy.Resources.MaxCPU = cfg.Deploy.Resources.CPU
+		}
+		if cfg.Deploy.Resources.MaxRAM > 0 && cfg.Deploy.Resources.MaxRAM < cfg.Deploy.Resources.RAM {
+			cfg.Deploy.Resources.MaxRAM = cfg.Deploy.Resources.RAM
+		}
+	} else {
+		cfg.Deploy.Runtime.AutoScaleMode = ""
+		cfg.Deploy.Resources.MaxCPU = 0
+		cfg.Deploy.Resources.MaxRAM = 0
 	}
 }
 
