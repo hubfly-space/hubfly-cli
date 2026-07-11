@@ -237,7 +237,7 @@ func buildExplainFlow(opts buildCommandOptions) error {
 		fmt.Printf("Build args: %s\n", strings.Join(inspect.BuildArgKeys, ", "))
 	}
 	if len(inspect.BuildSecretKeys) > 0 {
-		fmt.Printf("Build secrets: %s\n", strings.Join(inspect.BuildSecretKeys, ", "))
+		fmt.Printf("Build secrets: %d configured (redacted)\n", len(inspect.BuildSecretKeys))
 	}
 	if len(inspect.BuildConfig.ValidationWarnings) > 0 {
 		printDeployWarnings("Builder warnings", inspect.BuildConfig.ValidationWarnings)
