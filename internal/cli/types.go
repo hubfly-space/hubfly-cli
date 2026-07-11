@@ -6,7 +6,14 @@ import (
 	"os"
 )
 
-const apiHost = "https://hubfly.space"
+var apiHost = getAPIHost()
+
+func getAPIHost() string {
+	if url := os.Getenv("HUBFLY_API_URL"); url != "" {
+		return url
+	}
+	return "https://hubfly.space"
+}
 
 type apiError struct {
 	Status  int
@@ -49,7 +56,7 @@ type project struct {
 }
 
 type projectsResponse struct {
-	Projects []project `json:"projects"`
+	Projects []project `json:"items"`
 }
 
 type container struct {
@@ -99,12 +106,25 @@ type tunnel struct {
 	ExpiresAt string `json:"expiresAt"`
 }
 
+type jwk struct {
+	Kty string `json:"kty"`
+	N   string `json:"n"`
+	E   string `json:"e"`
+}
+
 type createTunnelRequest struct {
-	ProjectID       string `json:"projectId"`
-	TargetContainer string `json:"targetContainer"`
-	TargetPort      int    `json:"targetPort"`
-	ContainerID     string `json:"containerId"`
-	PublicKey       string `json:"publicKey"`
+	ContainerID   string `json:"containerId"`
+	TargetPort    int    `json:"targetPort"`
+	PublicKeyJWK  jwk    `json:"publicKeyJwk"`
+	PrivateKeyPEM string `json:"privateKeyPem"`
+}
+
+type organization struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Slug      string `json:"slug"`
+	Role      string `json:"role"`
+	CreatedAt string `json:"createdAt"`
 }
 
 var stdin = bufio.NewReader(os.Stdin)
