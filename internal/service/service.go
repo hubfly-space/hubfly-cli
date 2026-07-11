@@ -7,10 +7,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 type TunnelRequest struct {
@@ -179,10 +182,24 @@ func (m *manager) startTunnel(req TunnelRequest) error {
 		return fmt.Errorf("invalid private key: %w", err)
 	}
 
+	knownHostsPath := os.Getenv("SSH_KNOWN_HOSTS")
+	if knownHostsPath == "" {
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			return fmt.Errorf("failed to determine user home directory for known_hosts: %w", homeErr)
+		}
+		knownHostsPath = filepath.Join(home, ".ssh", "known_hosts")
+	}
+
+	hostKeyCallback, err := knownhosts.New(knownHostsPath)
+	if err != nil {
+		return fmt.Errorf("failed to initialize host key callback from %s: %w", knownHostsPath, err)
+	}
+
 	config := &ssh.ClientConfig{
 		User:            req.SSHUser,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         10 * time.Second,
 	}
 
