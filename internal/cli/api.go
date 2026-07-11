@@ -11,62 +11,72 @@ import (
 
 func fetchWhoAmI(token string) (user, error) {
 	var u user
-	err := doJSONRequest(http.MethodGet, apiHost+"/api/auth/whoami", token, nil, &u)
+	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/auth/me", token, nil, &u)
 	return u, err
 }
 
 func fetchProjects(token string) ([]project, error) {
 	var payload projectsResponse
-	err := doJSONRequest(http.MethodGet, apiHost+"/api/projects", token, nil, &payload)
+	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/projects", token, nil, &payload)
+	return payload.Projects, err
+}
+
+func fetchProjectsWithOrg(token, orgID string) ([]project, error) {
+	var payload projectsResponse
+	url := apiHost + "/api/v1/projects"
+	if orgID != "" {
+		url += "?organizationId=" + orgID
+	}
+	err := doJSONRequest(http.MethodGet, url, token, nil, &payload)
 	return payload.Projects, err
 }
 
 func fetchRegions(token string) ([]region, error) {
-	var payload struct {
-		Regions []region `json:"regions"`
-	}
-	err := doJSONRequest(http.MethodGet, apiHost+"/api/cli/deploy/regions", token, nil, &payload)
-	return payload.Regions, err
+	var payload []region
+	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/regions", token, nil, &payload)
+	return payload, err
 }
 
 func fetchProject(token, projectID string) (projectDetails, error) {
 	var payload projectDetails
-	err := doJSONRequest(http.MethodGet, apiHost+"/api/projects/"+projectID+"/containers", token, nil, &payload)
+	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/projects/"+projectID, token, nil, &payload)
 	return payload, err
 }
 
-func createProjectForDeploy(token, name, regionID string) (project, error) {
-	var payload struct {
-		Project project `json:"project"`
-	}
-	err := doJSONRequest(http.MethodPost, apiHost+"/api/cli/deploy/projects", token, map[string]string{
+func createProjectForDeploy(token, name, regionID, orgID string) (project, error) {
+	var payload project
+	body := map[string]string{
 		"name":     name,
 		"regionId": regionID,
-	}, &payload)
-	return payload.Project, err
+	}
+	if orgID != "" {
+		body["organizationId"] = orgID
+	}
+	err := doJSONRequest(http.MethodPost, apiHost+"/api/v1/projects/create", token, body, &payload)
+	return payload, err
 }
 
 func fetchTunnels(token, projectID string) ([]tunnel, error) {
 	var payload []tunnel
-	err := doJSONRequest(http.MethodGet, apiHost+"/api/projects/"+projectID+"/tunnels", token, nil, &payload)
+	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/projects/"+projectID+"/tunnels", token, nil, &payload)
 	return payload, err
 }
 
-func createTunnel(token string, req createTunnelRequest) (tunnel, error) {
+func createTunnel(token, projectID string, req createTunnelRequest) (tunnel, error) {
 	var t tunnel
-	err := doJSONRequest(http.MethodPost, apiHost+"/api/tunnels", token, req, &t)
+	err := doJSONRequest(http.MethodPost, apiHost+"/api/v1/projects/"+projectID+"/tunnels/create", token, req, &t)
 	return t, err
 }
 
 func createDeploySession(token string, req createDeploySessionRequest) (deploySessionResponse, error) {
 	var payload deploySessionResponse
-	err := doJSONRequest(http.MethodPost, apiHost+"/api/cli/deploy/sessions", token, req, &payload)
+	err := doJSONRequest(http.MethodPost, apiHost+"/api/v1/cli/deploy/sessions", token, req, &payload)
 	return payload, err
 }
 
 func fetchDeploySession(token, buildID string) (deploySessionStatusResponse, error) {
 	var payload deploySessionStatusResponse
-	err := doJSONRequest(http.MethodGet, apiHost+"/api/cli/deploy/sessions/"+buildID, token, nil, &payload)
+	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/cli/deploy/sessions/"+buildID, token, nil, &payload)
 	return payload, err
 }
 
@@ -74,7 +84,7 @@ func fetchDeployContainerSnapshot(token, containerID string) (deployContainerSna
 	var payload deployContainerSnapshotResponse
 	err := doJSONRequest(
 		http.MethodGet,
-		apiHost+"/api/cli/deploy/containers/"+containerID,
+		apiHost+"/api/v1/cli/deploy/containers/"+containerID,
 		token,
 		nil,
 		&payload,
@@ -92,6 +102,23 @@ func reportDeployCallback(buildID, status, uploadToken, errorMessage string) err
 		body["error"] = errorMessage
 	}
 	return doJSONRequest(http.MethodPost, apiHost+"/api/builds/callback", "", body, nil)
+}
+
+func fetchOrganizations(token string) ([]organization, error) {
+	var payload []organization
+	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/organizations", token, nil, &payload)
+	return payload, err
+}
+
+type containerLogsOutput struct {
+	Stdout string `json:"stdout"`
+	Stderr string `json:"stderr"`
+}
+
+func fetchContainerLogs(token, projectID, containerID string) (containerLogsOutput, error) {
+	var payload containerLogsOutput
+	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/projects/"+projectID+"/containers/"+containerID+"/logs", token, nil, &payload)
+	return payload, err
 }
 
 func doJSONRequest(method, url, token string, body any, out any) error {
@@ -164,5 +191,25 @@ func doJSONRequest(method, url, token string, body any, out any) error {
 	if out == nil || len(respBytes) == 0 {
 		return nil
 	}
+
+	var env struct {
+		OK    bool            `json:"ok"`
+		Data  json.RawMessage `json:"data"`
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+
+	if err := json.Unmarshal(respBytes, &env); err == nil && (env.OK || env.Error != nil) {
+		if !env.OK {
+			if env.Error != nil {
+				return &apiError{Status: resp.StatusCode, Message: env.Error.Message}
+			}
+			return &apiError{Status: resp.StatusCode, Message: "request failed"}
+		}
+		return json.Unmarshal(env.Data, out)
+	}
+
 	return json.Unmarshal(respBytes, out)
 }

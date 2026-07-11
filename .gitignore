@@ -17,3 +17,6 @@ coverage
 # Local runtime output
 logs
 *.log
+
+Dockerfile
+hubfly.build.json

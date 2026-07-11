@@ -399,8 +399,34 @@ func wrapBuilderInspectError(projectDir string, cfg deployConfigFile, cause erro
 	)
 }
 
+func resolveOrgID(token, orgFilter string) (string, error) {
+	if orgFilter == "" {
+		return "", nil
+	}
+	orgs, err := fetchOrganizations(token)
+	if err != nil {
+		return "", err
+	}
+	for _, o := range orgs {
+		if o.ID == orgFilter || o.Slug == orgFilter {
+			return o.ID, nil
+		}
+	}
+	return "", fmt.Errorf("organization '%s' not found", orgFilter)
+}
+
 func ensureDeployProjectBinding(token, projectDir string, cfg *deployConfigFile, opts deployOptions) error {
-	projects, err := fetchProjects(token)
+	orgID, err := resolveOrgID(token, opts.Org)
+	if err != nil {
+		return err
+	}
+
+	var projects []project
+	if orgID != "" {
+		projects, err = fetchProjectsWithOrg(token, orgID)
+	} else {
+		projects, err = fetchProjects(token)
+	}
 	if err != nil {
 		return err
 	}
@@ -500,7 +526,12 @@ func createProjectBinding(token, projectDir string, cfg *deployConfigFile, opts 
 		return err
 	}
 
-	createdProject, err := createProjectForDeploy(token, projectName, selectedRegion.ID)
+	orgID, err := resolveOrgID(token, opts.Org)
+	if err != nil {
+		return err
+	}
+
+	createdProject, err := createProjectForDeploy(token, projectName, selectedRegion.ID, orgID)
 	if err != nil {
 		return err
 	}

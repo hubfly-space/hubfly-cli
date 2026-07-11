@@ -19,6 +19,7 @@ type deployOptions struct {
 	Detach         bool
 	DockerfilePath string
 	BuilderVersion string
+	Org            string
 }
 
 func parseDeployOptions(args []string) (deployOptions, error) {
@@ -39,6 +40,7 @@ func parseDeployOptions(args []string) (deployOptions, error) {
 	fs.BoolVar(&opts.Detach, "detach", false, "return after upload without waiting for the deploy to finish")
 	fs.StringVar(&opts.DockerfilePath, "dockerfile", "", "override the Dockerfile path for this deploy")
 	fs.StringVar(&opts.BuilderVersion, "builder-version", "", "pin a specific hubfly-builder release tag, for example v1.7.1")
+	fs.StringVar(&opts.Org, "org", "", "filter projects by organization ID or slug")
 	if err := fs.Parse(rest); err != nil {
 		return deployOptions{}, fmt.Errorf("%w\n%s", err, deployUsage())
 	}
