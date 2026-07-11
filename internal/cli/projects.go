@@ -12,12 +12,30 @@ import (
 	"time"
 )
 
-func projectsFlow() error {
+func projectsFlow(orgFilter string) error {
 	token, err := ensureAuth(true)
 	if err != nil {
 		return err
 	}
-	return runProjectsTUI(token)
+
+	orgID := ""
+	if orgFilter != "" {
+		orgs, err := fetchOrganizations(token)
+		if err != nil {
+			return err
+		}
+		for _, o := range orgs {
+			if o.ID == orgFilter || o.Slug == orgFilter {
+				orgID = o.ID
+				break
+			}
+		}
+		if orgID == "" {
+			return fmt.Errorf("organization '%s' not found", orgFilter)
+		}
+	}
+
+	return runProjectsTUI(token, orgID)
 }
 
 func manageProject(token string, p project) error {
@@ -289,18 +307,17 @@ func stopSSHProcess(cmd *exec.Cmd) error {
 func createAndStoreTunnel(token, projectID string, c container, targetPort int) error {
 	fmt.Println("Generating SSH keys...")
 	tempID := fmt.Sprintf("temp-%d", time.Now().UnixNano())
-	publicKey, err := generateKeyPairAndSave(tempID)
+	publicKeyJWK, privateKeyPEM, err := generateKeyPairAndSave(tempID)
 	if err != nil {
 		return err
 	}
 
 	fmt.Println("Creating tunnel on server...")
-	t, err := createTunnel(token, createTunnelRequest{
-		ProjectID:       projectID,
-		TargetContainer: c.Name,
-		ContainerID:     c.ID,
-		TargetPort:      targetPort,
-		PublicKey:       publicKey,
+	t, err := createTunnel(token, projectID, createTunnelRequest{
+		ContainerID:   c.ID,
+		TargetPort:    targetPort,
+		PublicKeyJWK:  publicKeyJWK,
+		PrivateKeyPEM: privateKeyPEM,
 	})
 	if err != nil {
 		_ = removeKeyPair(tempID)
@@ -321,32 +338,9 @@ func tunnelFlow(containerIDOrName string, localPort, targetPort int) error {
 	}
 
 	fmt.Printf("Searching for container '%s'...\n", containerIDOrName)
-	projects, err := fetchProjects(token)
+	targetContainer, targetProjectID, err := findContainer(token, containerIDOrName)
 	if err != nil {
 		return err
-	}
-
-	var targetContainer *container
-	var targetProjectID string
-	for _, p := range projects {
-		details, fetchErr := fetchProject(token, p.ID)
-		if fetchErr != nil {
-			continue
-		}
-		for _, c := range details.Containers {
-			if c.ID == containerIDOrName || c.Name == containerIDOrName {
-				copyContainer := c
-				targetContainer = &copyContainer
-				targetProjectID = p.ID
-				break
-			}
-		}
-		if targetContainer != nil {
-			break
-		}
-	}
-	if targetContainer == nil {
-		return fmt.Errorf("container '%s' not found in any project", containerIDOrName)
 	}
 	fmt.Printf("Found container: %s (%s)\n", targetContainer.Name, targetContainer.ID)
 
@@ -382,17 +376,16 @@ func tunnelFlow(containerIDOrName string, localPort, targetPort int) error {
 	if tunnelToUse == nil {
 		fmt.Println("No suitable existing tunnel found. Creating new tunnel...")
 		tempID := fmt.Sprintf("temp-%d", time.Now().UnixNano())
-		publicKey, genErr := generateKeyPairAndSave(tempID)
+		publicKeyJWK, privateKeyPEM, genErr := generateKeyPairAndSave(tempID)
 		if genErr != nil {
 			return genErr
 		}
 
-		newTunnel, createErr := createTunnel(token, createTunnelRequest{
-			ProjectID:       targetProjectID,
-			TargetContainer: targetContainer.Name,
-			ContainerID:     targetContainer.ID,
-			TargetPort:      targetPort,
-			PublicKey:       publicKey,
+		newTunnel, createErr := createTunnel(token, targetProjectID, createTunnelRequest{
+			ContainerID:   targetContainer.ID,
+			TargetPort:    targetPort,
+			PublicKeyJWK:  publicKeyJWK,
+			PrivateKeyPEM: privateKeyPEM,
 		})
 		if createErr != nil {
 			_ = removeKeyPair(tempID)
@@ -540,4 +533,96 @@ func valueOrDash(v string) string {
 		return "-"
 	}
 	return v
+}
+
+func findContainer(token string, containerIDOrName string) (*container, string, error) {
+	projects, err := fetchProjects(token)
+	if err != nil {
+		return nil, "", err
+	}
+
+	for _, p := range projects {
+		details, fetchErr := fetchProject(token, p.ID)
+		if fetchErr != nil {
+			continue
+		}
+		for _, c := range details.Containers {
+			if c.ID == containerIDOrName || c.Name == containerIDOrName {
+				return &c, p.ID, nil
+			}
+		}
+	}
+	return nil, "", fmt.Errorf("container '%s' not found in any project", containerIDOrName)
+}
+
+func logsFlow(containerIDOrName string, follow bool) error {
+	token, err := ensureAuth(true)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Searching for container '%s'...\n", containerIDOrName)
+	c, projectID, err := findContainer(token, containerIDOrName)
+	if err != nil {
+		return err
+	}
+
+	if follow {
+		fmt.Printf("Streaming logs for container %s (%s) [Ctrl+C to stop]...\n", c.Name, c.ID)
+		var lastStdout, lastStderr string
+		for {
+			logs, err := fetchContainerLogs(token, projectID, c.ID)
+			if err != nil {
+				return err
+			}
+			if len(logs.Stdout) > len(lastStdout) {
+				fmt.Print(logs.Stdout[len(lastStdout):])
+				lastStdout = logs.Stdout
+			}
+			if len(logs.Stderr) > len(lastStderr) {
+				fmt.Fprint(os.Stderr, logs.Stderr[len(lastStderr):])
+				lastStderr = logs.Stderr
+			}
+			time.Sleep(2 * time.Second)
+		}
+	} else {
+		logs, err := fetchContainerLogs(token, projectID, c.ID)
+		if err != nil {
+			return err
+		}
+		if logs.Stdout != "" {
+			fmt.Println("--- STDOUT ---")
+			fmt.Print(logs.Stdout)
+		}
+		if logs.Stderr != "" {
+			fmt.Println("--- STDERR ---")
+			fmt.Print(logs.Stderr)
+		}
+	}
+	return nil
+}
+
+func organizationsFlow() error {
+	token, err := ensureAuth(true)
+	if err != nil {
+		return err
+	}
+
+	orgs, err := fetchOrganizations(token)
+	if err != nil {
+		return err
+	}
+
+	if len(orgs) == 0 {
+		fmt.Println("You do not belong to any organizations.")
+		return nil
+	}
+
+	fmt.Println("Organizations:")
+	fmt.Printf("%-28s %-20s %-12s %-25s\n", "ID", "NAME", "SLUG", "ROLE")
+	fmt.Println(strings.Repeat("-", 90))
+	for _, o := range orgs {
+		fmt.Printf("%-28s %-20s %-12s %-25s\n", o.ID, o.Name, o.Slug, o.Role)
+	}
+	return nil
 }

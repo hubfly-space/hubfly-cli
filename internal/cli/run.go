@@ -40,7 +40,14 @@ func run(args []string) error {
 		_, err := ensureAuth(false)
 		return err
 	case "projects":
-		return projectsFlow()
+		orgFilter := ""
+		for i, arg := range args {
+			if arg == "--org" && i+1 < len(args) {
+				orgFilter = args[i+1]
+				break
+			}
+		}
+		return projectsFlow(orgFilter)
 	case "deploy":
 		opts, err := parseDeployOptions(args[1:])
 		if err != nil {
@@ -62,6 +69,17 @@ func run(args []string) error {
 			return errors.New("invalid target port")
 		}
 		return tunnelFlow(args[1], localPort, targetPort)
+	case "orgs", "org", "organizations":
+		return organizationsFlow()
+	case "logs":
+		if len(args) < 2 {
+			return errors.New("usage: hubfly logs <containerIdOrName> [--follow|-f]")
+		}
+		follow := false
+		if len(args) >= 3 && (args[2] == "--follow" || args[2] == "-f") {
+			follow = true
+		}
+		return logsFlow(args[1], follow)
 	case "version", "--version", "-v":
 		showVersion()
 		return nil
@@ -84,6 +102,8 @@ func printUsage() {
 	fmt.Println("  hubfly [--debug] logout")
 	fmt.Println("  hubfly [--debug] whoami")
 	fmt.Println("  hubfly [--debug] projects")
+	fmt.Println("  hubfly [--debug] orgs")
+	fmt.Println("  hubfly [--debug] logs <containerIdOrName> [--follow|-f]")
 	fmt.Println("  hubfly [--debug] deploy [advanced|--advanced] [--project <id|name|new>] [--region <region>] [--yes]")
 	fmt.Println("       [--config <path>] [--detach] [--dockerfile <path>] [--builder-version <tag>]")
 	fmt.Println("  hubfly [--debug] build <init|validate|edit|explain>")

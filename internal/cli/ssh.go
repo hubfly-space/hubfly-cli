@@ -1,8 +1,14 @@
 package cli
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,22 +17,45 @@ import (
 	"time"
 )
 
-func generateKeyPairAndSave(identifier string) (string, error) {
+func generateKeyPairAndSave(identifier string) (jwk, string, error) {
 	if err := os.MkdirAll(keysDir(), 0o700); err != nil {
-		return "", err
+		return jwk{}, "", err
 	}
 	privateKeyPath := filepath.Join(keysDir(), identifier)
-	publicKeyPath := privateKeyPath + ".pub"
 
-	cmd := exec.Command("ssh-keygen", "-q", "-t", "rsa", "-b", "4096", "-N", "", "-f", privateKeyPath)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("ssh-keygen failed: %v (%s)", err, strings.TrimSpace(string(out)))
-	}
-	pub, err := os.ReadFile(publicKeyPath)
+	// Generate 4096-bit RSA key
+	privateKey, err := rsa.GenerateKey(rand.Reader, 4096)
 	if err != nil {
-		return "", err
+		return jwk{}, "", err
 	}
-	return strings.TrimSpace(string(pub)), nil
+
+	// Encode Private Key to PEM (PKCS#1 RSA private key format)
+	privBytes := x509.MarshalPKCS1PrivateKey(privateKey)
+	privBlock := &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: privBytes,
+	}
+	privPEM := pem.EncodeToMemory(privBlock)
+
+	// Save private key file
+	if err := os.WriteFile(privateKeyPath, privPEM, 0600); err != nil {
+		return jwk{}, "", err
+	}
+
+	// Create JWK for Public Key
+	nBytes := privateKey.PublicKey.N.Bytes()
+	nBase64 := base64.RawURLEncoding.EncodeToString(nBytes)
+
+	eBytes := big.NewInt(int64(privateKey.PublicKey.E)).Bytes()
+	eBase64 := base64.RawURLEncoding.EncodeToString(eBytes)
+
+	pubJWK := jwk{
+		Kty: "RSA",
+		N:   nBase64,
+		E:   eBase64,
+	}
+
+	return pubJWK, string(privPEM), nil
 }
 
 func removeKeyPair(identifier string) error {

@@ -105,6 +105,7 @@ type multiEventMsg struct {
 
 type projectsApp struct {
 	token string
+	orgID string
 
 	list  list.Model
 	input textinput.Model
@@ -139,16 +140,16 @@ type projectsApp struct {
 	height int
 }
 
-func runProjectsTUI(token string) error {
+func runProjectsTUI(token string, orgID string) error {
 	setTUIDebugMode(true)
 	defer setTUIDebugMode(false)
-	m := newProjectsApp(token)
+	m := newProjectsApp(token, orgID)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }
 
-func newProjectsApp(token string) projectsApp {
+func newProjectsApp(token string, orgID string) projectsApp {
 	d := list.NewDefaultDelegate()
 	d.ShowDescription = true
 	l := list.New([]list.Item{}, d, 100, 24)
@@ -165,6 +166,7 @@ func newProjectsApp(token string) projectsApp {
 
 	return projectsApp{
 		token:             token,
+		orgID:             orgID,
 		list:              l,
 		input:             ti,
 		view:              viewProjects,
@@ -173,7 +175,7 @@ func newProjectsApp(token string) projectsApp {
 }
 
 func (m projectsApp) Init() tea.Cmd {
-	return fetchProjectsCmd(m.token)
+	return fetchProjectsCmd(m.token, m.orgID)
 }
 
 func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -848,9 +850,9 @@ func (m *projectsApp) stopAllMulti() {
 	m.multiEvents = nil
 }
 
-func fetchProjectsCmd(token string) tea.Cmd {
+func fetchProjectsCmd(token, orgID string) tea.Cmd {
 	return func() tea.Msg {
-		projects, err := fetchProjects(token)
+		projects, err := fetchProjectsWithOrg(token, orgID)
 		return projectsLoadedMsg{projects: projects, err: err}
 	}
 }
@@ -881,17 +883,16 @@ func createTunnelWithKeyCmd(token, projectID string, c container, targetPort int
 
 func createTunnelWithKey(token, projectID string, c container, targetPort int) error {
 	tempID := fmt.Sprintf("temp-%d-%d-%d", syscall.Getpid(), targetPort, time.Now().UnixNano())
-	publicKey, err := generateKeyPairAndSave(tempID)
+	publicKeyJWK, privateKeyPEM, err := generateKeyPairAndSave(tempID)
 	if err != nil {
 		return err
 	}
 
-	t, err := createTunnel(token, createTunnelRequest{
-		ProjectID:       projectID,
-		TargetContainer: c.Name,
-		ContainerID:     c.ID,
-		TargetPort:      targetPort,
-		PublicKey:       publicKey,
+	t, err := createTunnel(token, projectID, createTunnelRequest{
+		ContainerID:   c.ID,
+		TargetPort:    targetPort,
+		PublicKeyJWK:  publicKeyJWK,
+		PrivateKeyPEM: privateKeyPEM,
 	})
 	if err != nil {
 		_ = removeKeyPair(tempID)
