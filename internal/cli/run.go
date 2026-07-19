@@ -55,6 +55,8 @@ func run(args []string) error {
 			return err
 		}
 		return deployFlowWithOptions(opts)
+	case "stack":
+		return stackFlow(args[1:])
 	case "build":
 		return runBuildCommand(args[1:])
 	case "tunnel":
@@ -133,6 +135,7 @@ func printUsage() {
 	fmt.Println("  hubfly [--debug] logs <containerIdOrName> [--follow|-f]")
 	fmt.Println("  hubfly [--debug] deploy [advanced|--advanced] [--project <id|name|new>] [--region <region>] [--yes]")
 	fmt.Println("       [--config <path>] [--detach] [--dockerfile <path>] [--builder-version <tag>]")
+	fmt.Println("  hubfly [--debug] stack <plan|up|status|logs|exec|ssh|down> [options]")
 	fmt.Println("  hubfly [--debug] build <init|validate|edit|explain>")
 	fmt.Println("  hubfly [--debug] tunnel <containerIdOrName> <localPort> <targetPort>")
 	fmt.Println("  hubfly [--debug] ssh <containerIdOrName> [-- <cmd> [args...]]")

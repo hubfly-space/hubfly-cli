@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	terminalDialTimeout = 10 * time.Second
+	terminalDialTimeout  = 10 * time.Second
 	terminalPingInterval = 25 * time.Second
 )
 
@@ -54,7 +54,18 @@ func sshFlow(containerIDOrName string) error {
 		return err
 	}
 
-	session, err := createTerminalSession(token, targetProjectID, targetContainer.ID)
+	return sshContainerTerminal(
+		token,
+		targetProjectID,
+		targetContainer.ID,
+		containerIDOrName,
+	)
+}
+
+func sshContainerTerminal(
+	token, projectID, containerID, displayName string,
+) error {
+	session, err := createTerminalSession(token, projectID, containerID)
 	if err != nil {
 		return fmt.Errorf("failed to create terminal session: %w", err)
 	}
