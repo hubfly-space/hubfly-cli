@@ -6,6 +6,12 @@ import (
 	"strings"
 )
 
+const cliAuthURL = "https://hubfly.space/cli/auth"
+
+func authRequiredError() error {
+	return fmt.Errorf("authentication required; open %s to create a token, then run hubfly login --token <token>", cliAuthURL)
+}
+
 func login(providedToken string) error {
 	token := strings.TrimSpace(providedToken)
 	if token != "" {
@@ -20,17 +26,27 @@ func login(providedToken string) error {
 		return nil
 	}
 
+	if !isInteractiveShell() {
+		return authRequiredError()
+	}
+
+	emptyAttempts := 0
 	for {
-		fmt.Println("Please authenticate to continue. Go to https://hubfly.space/cli/auth to get the token")
+		fmt.Printf("Please authenticate to continue. Go to %s to get the token\n", cliAuthURL)
 		input, err := prompt("Enter your API token: ")
 		if err != nil {
 			return err
 		}
 		input = strings.TrimSpace(input)
 		if input == "" {
+			emptyAttempts++
+			if emptyAttempts >= 3 {
+				return authRequiredError()
+			}
 			fmt.Println("Token cannot be empty.")
 			continue
 		}
+		emptyAttempts = 0
 
 		u, authErr := fetchWhoAmI(input)
 		if authErr != nil {
@@ -55,6 +71,9 @@ func ensureAuth(silent bool) (string, error) {
 		if !silent {
 			fmt.Println("No valid session found.")
 		}
+		if !isInteractiveShell() {
+			return "", authRequiredError()
+		}
 		if err := login(""); err != nil {
 			return "", err
 		}
@@ -75,6 +94,9 @@ func ensureAuth(silent bool) (string, error) {
 			fmt.Println("Session expired or invalid.")
 		}
 		_ = deleteToken()
+		if !isInteractiveShell() {
+			return "", authRequiredError()
+		}
 		if loginErr := login(""); loginErr != nil {
 			return "", loginErr
 		}

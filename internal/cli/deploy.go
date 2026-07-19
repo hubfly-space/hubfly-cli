@@ -112,9 +112,9 @@ func deployFlowWithOptions(opts deployOptions) error {
 		fmt.Sprintf("docker build using %s", displayDeployBuildSource(projectDir, prepared)),
 	)
 	if err := buildLocalImage(projectDir, prepared.DockerfilePath, localTag, cfg); err != nil {
-		_ = reportDeployCallback(
+		_ = reportDeployFailure(
+			token,
 			session.BuildID,
-			"failed",
 			session.Upload.Token,
 			"Local build failed: "+err.Error(),
 		)
@@ -129,9 +129,9 @@ func deployFlowWithOptions(opts deployOptions) error {
 		fmt.Sprintf("Streaming image to %s (%s)", session.Region.Name, session.Region.PrimaryIP),
 	)
 	if err := uploadLocalImage(localTag, session); err != nil {
-		_ = reportDeployCallback(
+		_ = reportDeployFailure(
+			token,
 			session.BuildID,
-			"failed",
 			session.Upload.Token,
 			"Image upload failed: "+err.Error(),
 		)

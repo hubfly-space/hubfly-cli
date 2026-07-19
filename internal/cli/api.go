@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -23,11 +24,11 @@ func fetchProjects(token string) ([]project, error) {
 
 func fetchProjectsWithOrg(token, orgID string) ([]project, error) {
 	var payload projectsResponse
-	url := apiHost + "/api/v1/projects"
+	requestURL := apiHost + "/api/v1/projects"
 	if orgID != "" {
-		url += "?organizationId=" + orgID
+		requestURL += "?organizationId=" + url.QueryEscape(orgID)
 	}
-	err := doJSONRequest(http.MethodGet, url, token, nil, &payload)
+	err := doJSONRequest(http.MethodGet, requestURL, token, nil, &payload)
 	return payload.Projects, err
 }
 
@@ -92,16 +93,18 @@ func fetchDeployContainerSnapshot(token, containerID string) (deployContainerSna
 	return payload, err
 }
 
-func reportDeployCallback(buildID, status, uploadToken, errorMessage string) error {
+func reportDeployFailure(token, buildID, uploadToken, errorMessage string) error {
 	body := map[string]string{
-		"id":          buildID,
-		"status":      status,
 		"uploadToken": uploadToken,
+		"error":       errorMessage,
 	}
-	if strings.TrimSpace(errorMessage) != "" {
-		body["error"] = errorMessage
-	}
-	return doJSONRequest(http.MethodPost, apiHost+"/api/builds/callback", "", body, nil)
+	return doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/cli/deploy/sessions/"+url.PathEscape(buildID)+"/fail",
+		token,
+		body,
+		nil,
+	)
 }
 
 func createTerminalSession(token, projectID, containerID string) (terminalSession, error) {
@@ -194,20 +197,46 @@ func doJSONRequestWithTimeout(method, url, token string, body any, out any, time
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg := strings.TrimSpace(string(respBytes))
+		code := ""
+		requestID := ""
+		errorID := ""
 		if len(respBytes) > 0 {
-			var apiPayload map[string]any
+			var apiPayload struct {
+				Error   any    `json:"error"`
+				Message string `json:"message"`
+				Meta    struct {
+					RequestID string `json:"requestId"`
+				} `json:"meta"`
+			}
 			if err := json.Unmarshal(respBytes, &apiPayload); err == nil {
-				if apiErrorMessage, ok := apiPayload["error"].(string); ok && strings.TrimSpace(apiErrorMessage) != "" {
+				requestID = strings.TrimSpace(apiPayload.Meta.RequestID)
+				if apiErrorMessage, ok := apiPayload.Error.(string); ok && strings.TrimSpace(apiErrorMessage) != "" {
 					msg = strings.TrimSpace(apiErrorMessage)
-				} else if message, ok := apiPayload["message"].(string); ok && strings.TrimSpace(message) != "" {
-					msg = strings.TrimSpace(message)
+				} else if errorObject, ok := apiPayload.Error.(map[string]any); ok {
+					if value, ok := errorObject["message"].(string); ok && strings.TrimSpace(value) != "" {
+						msg = strings.TrimSpace(value)
+					}
+					if value, ok := errorObject["code"].(string); ok {
+						code = strings.TrimSpace(value)
+					}
+					if value, ok := errorObject["errorId"].(string); ok {
+						errorID = strings.TrimSpace(value)
+					}
+				} else if strings.TrimSpace(apiPayload.Message) != "" {
+					msg = strings.TrimSpace(apiPayload.Message)
 				}
 			}
 		}
 		if msg == "" {
 			msg = "request failed"
 		}
-		return &apiError{Status: resp.StatusCode, Message: msg}
+		return &apiError{
+			Status:    resp.StatusCode,
+			Code:      code,
+			Message:   msg,
+			RequestID: requestID,
+			ErrorID:   errorID,
+		}
 	}
 
 	if out == nil || len(respBytes) == 0 {
@@ -226,7 +255,11 @@ func doJSONRequestWithTimeout(method, url, token string, body any, out any, time
 	if err := json.Unmarshal(respBytes, &env); err == nil && (env.OK || env.Error != nil) {
 		if !env.OK {
 			if env.Error != nil {
-				return &apiError{Status: resp.StatusCode, Message: env.Error.Message}
+				return &apiError{
+					Status:  resp.StatusCode,
+					Code:    env.Error.Code,
+					Message: env.Error.Message,
+				}
 			}
 			return &apiError{Status: resp.StatusCode, Message: "request failed"}
 		}

@@ -12,15 +12,25 @@ func getAPIHost() string {
 	if url := os.Getenv("HUBFLY_API_URL"); url != "" {
 		return url
 	}
-	return "https://hubfly.space"
+	return "https://api.hubfly.space"
 }
 
 type apiError struct {
-	Status  int
-	Message string
+	Status    int
+	Code      string
+	Message   string
+	RequestID string
+	ErrorID   string
 }
 
 func (e *apiError) Error() string {
+	traceID := e.ErrorID
+	if traceID == "" {
+		traceID = e.RequestID
+	}
+	if traceID != "" {
+		return fmt.Sprintf("%s (status %d, trace %s)", e.Message, e.Status, traceID)
+	}
 	return fmt.Sprintf("%s (status %d)", e.Message, e.Status)
 }
 
