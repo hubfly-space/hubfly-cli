@@ -240,7 +240,16 @@ func (m *manager) runTunnel(ctx context.Context, active *ActiveTunnel) {
 		m.failTunnel(active.Req.ID, err)
 		return
 	}
-	err = serveTunnelGateway(ctx, active.Req, target, active.Req.LocalPort, active.Ready)
+	err = serveTunnelGateway(
+		ctx,
+		active.Req,
+		target,
+		active.Req.LocalPort,
+		active.Ready,
+		func() {
+			m.setTunnelStatus(active.Req.ID, "active", "")
+		},
+	)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		m.failTunnel(active.Req.ID, err)
 		return
@@ -271,6 +280,17 @@ func (m *manager) failTunnel(id string, err error) {
 	m.finishTunnel(id, "error", err.Error())
 }
 
+func (m *manager) setTunnelStatus(id, status, lastError string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tunnels[id]
+	if !ok {
+		return
+	}
+	t.Status = status
+	t.LastError = lastError
+}
+
 func (m *manager) finishTunnel(id, status, lastError string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -291,6 +311,7 @@ func serveTunnelGateway(
 	target TunnelTarget,
 	localPort int,
 	ready chan struct{},
+	onReady func(),
 ) error {
 	wsConfig, err := websocket.NewConfig(req.ConnectURL, apiHost())
 	if err != nil {
@@ -344,6 +365,9 @@ authenticated:
 		return fmt.Errorf("failed to listen on localhost:%d: %w", localPort, err)
 	}
 	defer listener.Close()
+	if onReady != nil {
+		onReady()
+	}
 	close(ready)
 
 	go func() {
