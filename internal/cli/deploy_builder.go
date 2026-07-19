@@ -22,6 +22,7 @@ const builderReleaseCacheTTL = 10 * time.Minute
 
 type builderInstallRequest struct {
 	RequestedVersion string
+	CheckLatest      bool
 }
 
 type cachedGitHubRelease struct {
@@ -34,13 +35,13 @@ type builderReleaseCache struct {
 	Tags   map[string]cachedGitHubRelease `json:"tags,omitempty"`
 }
 
-func fetchBuilderReleaseCached(requestedVersion string) (githubRelease, bool, error) {
+func fetchBuilderReleaseCached(requestedVersion string, checkLatest bool) (githubRelease, bool, error) {
 	tag := normalizeVersion(requestedVersion)
 	cache, _ := loadBuilderReleaseCache()
 	now := time.Now().UTC()
 
 	if tag == "" {
-		if cache.Latest != nil && isCachedReleaseFresh(*cache.Latest, now) {
+		if !checkLatest && cache.Latest != nil && isCachedReleaseFresh(*cache.Latest, now) {
 			return cache.Latest.Release, true, nil
 		}
 		release, err := fetchGitHubReleaseForRepo("", builderRepoOwner, builderRepoName)

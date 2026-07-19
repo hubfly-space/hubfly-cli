@@ -295,6 +295,7 @@ func prepareDeployBuild(projectDir, cfgPath string, cfg *deployConfigFile, reque
 
 	builderPath, builderVersion, err := ensureLocalBuilderBinary(builderInstallRequest{
 		RequestedVersion: requestedBuilderVersion,
+		CheckLatest:      true,
 	})
 	if err != nil {
 		return deployPreparedBuild{}, err
@@ -648,7 +649,7 @@ func ensureLocalBuilderBinary(request builderInstallRequest) (string, string, er
 		return targetPath, version, nil
 	}
 
-	release, _, err := fetchBuilderReleaseCached(request.RequestedVersion)
+	release, _, err := fetchBuilderReleaseCached(request.RequestedVersion, request.CheckLatest)
 	if err != nil {
 		return cachedBuilderOrVersionError(
 			targetPath,

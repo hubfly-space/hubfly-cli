@@ -108,7 +108,7 @@ Multi-tunnel selection:
 `hubfly deploy` works directly from your project directory. The CLI:
 
 - creates or reuses `hubfly.build.json`
-- reuses a cached `hubfly-builder` unless a newer or pinned version is needed
+- checks for the latest `hubfly-builder` release before deploy unless `--builder-version` pins a specific version
 - runs builder inspection for auto-detected stacks
 - builds the Docker image locally on your machine
 - uploads a compressed image archive to the regional builder with retryable chunk uploads
