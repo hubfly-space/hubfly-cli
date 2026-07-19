@@ -24,6 +24,7 @@ hubfly version
 - Persistent Bubble Tea TUI for project/container/tunnel workflow (`projects`)
 - Single and multiple tunnel connect flows
 - SSH, one-shot command exec, and log streaming for containers
+- Local-first stack orchestration for Compose-style apps (`stack`)
 - Local tunnel status screens while sessions are active
 - Local `hubfly deploy` flow with reusable `hubfly-builder`, `hubfly.build.json`, deploy diffs, and resumable image uploads
 - Build config helpers: `hubfly build init|validate|edit|explain`
@@ -41,6 +42,13 @@ hubfly whoami
 hubfly projects
 hubfly deploy [advanced|--advanced] [--project <id|name|new>] [--region <region>] [--yes]
               [--config <path>] [--detach] [--dockerfile <path>] [--builder-version <tag>]
+hubfly stack plan [--file <compose-file>]
+hubfly stack up [--file <compose-file>] [--project <id|name|new>] [--region <region>] [--yes] [--remove-orphans] [--no-build]
+hubfly stack status [--file <compose-file>]
+hubfly stack logs [service...] [--follow|-f]
+hubfly stack exec <service> -- <cmd> [args...]
+hubfly stack ssh <service>
+hubfly stack down [--file <compose-file>] [--volumes] [--yes]
 hubfly build init [--config <path>] [--dockerfile <path>] [--force] [--print]
 hubfly build validate [--config <path>] [--dockerfile <path>] [--builder-version <tag>] [--json]
 hubfly build edit [--config <path>]
@@ -207,6 +215,7 @@ Runtime logs:
 ```bash
 hubfly logs <containerIdOrName>
 hubfly logs <containerIdOrName> --follow
+hubfly stack logs api --follow
 ```
 
 Remote command execution:
@@ -216,6 +225,36 @@ hubfly ssh <containerIdOrName>
 hubfly ssh <containerIdOrName> -- ls -la /app
 hubfly exec <containerIdOrName> -- printenv
 hubfly exec <containerIdOrName> -- sh -lc "ls -la /app"
+hubfly stack exec api -- printenv
+hubfly stack ssh api
+```
+
+## Stack Deploys
+
+`hubfly stack` reads a local Compose-style file, builds any `build:` services on the user machine, pushes them through the authenticated regional registry upload flow, and creates or updates each service as a normal Hubfly container.
+
+Supported today:
+
+- `image` and `build` services
+- named volumes
+- `environment` and `env_file`
+- `ports`, `depends_on`, `healthcheck`, and `restart`
+- `x-hubfly` overrides for tier, resources, runtime, and volume size
+
+Current behavior:
+
+- build-backed services redeploy in place through the existing CLI deploy session path
+- image-only services are recreated when their config changes
+- bind mounts are ignored with warnings; use named volumes instead
+
+Examples:
+
+```bash
+hubfly stack plan --file docker-compose.yml
+hubfly stack up --project new --region eu-1 --yes
+hubfly stack status
+hubfly stack logs web --follow
+hubfly stack down --volumes --yes
 ```
 
 ## SSH tunnel behavior

@@ -44,6 +44,71 @@ func fetchProject(token, projectID string) (projectDetails, error) {
 	return payload, err
 }
 
+func createProjectContainer(
+	token, projectID string,
+	req map[string]any,
+) (map[string]any, error) {
+	var payload map[string]any
+	err := doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/containers/create",
+		token,
+		req,
+		&payload,
+	)
+	return payload, err
+}
+
+func patchProjectContainerConfig(
+	token, projectID, containerID string,
+	req map[string]any,
+) (map[string]any, error) {
+	var payload map[string]any
+	err := doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/containers/"+containerID+"/config",
+		token,
+		req,
+		&payload,
+	)
+	return payload, err
+}
+
+func removeProjectContainer(token, projectID, containerID string) error {
+	return doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/containers/"+containerID+"/remove",
+		token,
+		map[string]any{},
+		nil,
+	)
+}
+
+func createProjectVolume(
+	token, projectID string,
+	req map[string]any,
+) (map[string]any, error) {
+	var payload map[string]any
+	err := doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/volumes/create",
+		token,
+		req,
+		&payload,
+	)
+	return payload, err
+}
+
+func removeProjectVolume(token, projectID, volumeID string) error {
+	return doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/volumes/"+volumeID+"/remove",
+		token,
+		map[string]any{},
+		nil,
+	)
+}
+
 func createProjectForDeploy(token, name, regionID, orgID string) (project, error) {
 	var payload project
 	body := map[string]string{

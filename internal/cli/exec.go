@@ -18,7 +18,22 @@ func execFlow(containerIDOrName string, command []string, timeout time.Duration)
 		return err
 	}
 
-	result, err := execInContainer(token, targetProjectID, targetContainer.ID, command, timeout)
+	return execContainerCommand(
+		token,
+		targetProjectID,
+		targetContainer.ID,
+		containerIDOrName,
+		command,
+		timeout,
+	)
+}
+
+func execContainerCommand(
+	token, projectID, containerID, displayName string,
+	command []string,
+	timeout time.Duration,
+) error {
+	result, err := execInContainer(token, projectID, containerID, command, timeout)
 	if err != nil {
 		return err
 	}
