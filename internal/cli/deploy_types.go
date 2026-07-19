@@ -233,8 +233,14 @@ type deploySessionResponse struct {
 		PrimaryIP string `json:"primaryIP"`
 	} `json:"region"`
 	Upload struct {
-		URL   string `json:"url"`
-		Token string `json:"token"`
+		Mode           string `json:"mode"`
+		URL            string `json:"url,omitempty"`
+		RegistryHost   string `json:"registryHost"`
+		RegistryScheme string `json:"registryScheme"`
+		PushRef        string `json:"pushRef"`
+		CanonicalRef   string `json:"canonicalRef"`
+		Token          string `json:"token"`
+		ExpiresAt      string `json:"expiresAt"`
 	} `json:"upload"`
 	Status string `json:"status"`
 }

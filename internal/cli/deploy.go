@@ -1010,20 +1010,6 @@ func writeBuildSecretFiles(envVars []deployEnvVar) (map[string]string, func(), e
 	return files, cleanup, nil
 }
 
-func uploadLocalImage(localTag string, session deploySessionResponse) error {
-	printDeployStep(
-		"Upload archive",
-		"Compressing the local Docker image before transfer",
-	)
-	archivePath, archiveSize, cleanup, err := exportCompressedImageArchive(localTag)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	return uploadChunkedImageArchive(archivePath, archiveSize, session, localTag)
-}
-
 func estimateLocalImageSize(localTag string) int64 {
 	output, err := commandOutput(exec.Command("docker", "image", "inspect", localTag, "--format", "{{.Size}}"))
 	if err != nil {
