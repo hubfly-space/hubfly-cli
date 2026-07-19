@@ -1,31 +1,42 @@
 package service
 
 import (
-	"bytes"
+	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hashicorp/yamux"
+	"golang.org/x/net/websocket"
 )
 
+const tunnelDialTimeout = 10 * time.Second
+
 type TunnelRequest struct {
-	ID         string `json:"id"`
-	SSHHost    string `json:"ssh_host"`
-	SSHPort    int    `json:"ssh_port"`
-	SSHUser    string `json:"ssh_user"`
-	PrivateKey string `json:"private_key"`
-	LocalPort  int    `json:"local_port"`
-	RemoteHost string `json:"remote_host"`
-	RemotePort int    `json:"remote_port"`
+	ID              string         `json:"id"`
+	ConnectURL      string         `json:"connect_url"`
+	ConnectToken    string         `json:"connect_token"`
+	ProtocolVersion int            `json:"protocol_version"`
+	LocalPort       int            `json:"local_port"`
+	TargetPort      int            `json:"target_port"`
+	Targets         []TunnelTarget `json:"targets"`
+}
+
+type TunnelTarget struct {
+	TargetID      string `json:"target_id"`
+	ContainerID   string `json:"container_id"`
+	ContainerName string `json:"container_name"`
+	TargetPort    int    `json:"target_port"`
+	LocalPort     int    `json:"local_port"`
 }
 
 type TunnelStatus struct {
@@ -33,21 +44,48 @@ type TunnelStatus struct {
 	LocalPort int    `json:"local_port"`
 	Target    string `json:"target"`
 	Status    string `json:"status"`
-	SSHServer string `json:"ssh_server"`
+	Gateway   string `json:"gateway"`
 	Error     string `json:"error,omitempty"`
 }
 
 type ActiveTunnel struct {
-	Req            TunnelRequest
-	Cmd            *exec.Cmd
-	Quit           chan struct{}
-	PrivateKeyPath string
-	LastError      string
+	Req       TunnelRequest
+	Cancel    context.CancelFunc
+	Done      chan struct{}
+	Ready     chan struct{}
+	Status    string
+	LastError string
 }
 
 type manager struct {
 	mu      sync.Mutex
 	tunnels map[string]*ActiveTunnel
+}
+
+type tunnelClientMessage struct {
+	Type            string `json:"type"`
+	ProtocolVersion int    `json:"protocolVersion"`
+	TunnelID        string `json:"tunnelId,omitempty"`
+	ConnectToken    string `json:"connectToken,omitempty"`
+}
+
+type tunnelServerMessage struct {
+	Type            string `json:"type"`
+	Code            string `json:"code,omitempty"`
+	Message         string `json:"message,omitempty"`
+	TunnelID        string `json:"tunnelId,omitempty"`
+	ProtocolVersion int    `json:"protocolVersion,omitempty"`
+}
+
+type tunnelStreamConnectRequest struct {
+	Type     string `json:"type"`
+	TargetID string `json:"targetId"`
+}
+
+type tunnelStreamConnectResponse struct {
+	Type    string `json:"type"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 func Run(port int) error {
@@ -93,13 +131,13 @@ func (m *manager) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	if req.SSHHost == "" || req.SSHPort == 0 || req.PrivateKey == "" || req.LocalPort == 0 || req.RemoteHost == "" || req.RemotePort == 0 {
-		http.Error(w, "Missing required fields (ssh_host, ssh_port, private_key, local_port, remote_host, remote_port)", http.StatusBadRequest)
+	if strings.TrimSpace(req.ConnectURL) == "" || strings.TrimSpace(req.ConnectToken) == "" || req.LocalPort <= 0 {
+		http.Error(w, "Missing required fields (connect_url, connect_token, local_port)", http.StatusBadRequest)
 		return
 	}
-	if req.SSHUser == "" {
-		req.SSHUser = "root"
+	if len(req.Targets) == 0 {
+		http.Error(w, "Missing required tunnel targets", http.StatusBadRequest)
+		return
 	}
 	if req.ID == "" {
 		req.ID = fmt.Sprintf("tunnel-%d", req.LocalPort)
@@ -111,27 +149,43 @@ func (m *manager) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Tunnel with ID %s already exists", req.ID), http.StatusConflict)
 		return
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	active := &ActiveTunnel{
+		Req:    req,
+		Cancel: cancel,
+		Done:   make(chan struct{}),
+		Ready:  make(chan struct{}),
+		Status: "starting",
+	}
+	m.tunnels[req.ID] = active
 	m.mu.Unlock()
 
-	go func() {
-		if err := m.startTunnel(req); err != nil {
-			log.Printf("Failed to start tunnel %s: %v", req.ID, err)
-		}
-	}()
+	go m.runTunnel(ctx, active)
 
-	time.Sleep(500 * time.Millisecond)
+	select {
+	case <-active.Ready:
+	case <-time.After(3 * time.Second):
+	case <-active.Done:
+	}
+
 	m.mu.Lock()
-	_, running := m.tunnels[req.ID]
+	current, ok := m.tunnels[req.ID]
+	status := active.Status
+	lastError := active.LastError
+	if ok {
+		status = current.Status
+		lastError = current.LastError
+	}
 	m.mu.Unlock()
 
-	if !running {
-		http.Error(w, "Failed to establish tunnel connection immediately. Check logs.", http.StatusInternalServerError)
+	if status == "error" {
+		http.Error(w, lastError, http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"status": "initiated",
+		"status": status,
 		"id":     req.ID,
 	})
 }
@@ -168,9 +222,9 @@ func (m *manager) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		statuses = append(statuses, TunnelStatus{
 			ID:        id,
 			LocalPort: t.Req.LocalPort,
-			Target:    fmt.Sprintf("%s:%d", t.Req.RemoteHost, t.Req.RemotePort),
-			SSHServer: fmt.Sprintf("%s:%d", t.Req.SSHHost, t.Req.SSHPort),
-			Status:    "active",
+			Target:    describeTarget(t.Req),
+			Gateway:   t.Req.ConnectURL,
+			Status:    t.Status,
 			Error:     t.LastError,
 		})
 	}
@@ -179,86 +233,19 @@ func (m *manager) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(statuses)
 }
 
-func (m *manager) startTunnel(req TunnelRequest) error {
-	privateKeyPath, err := writeTunnelPrivateKey(req.ID, req.PrivateKey)
+func (m *manager) runTunnel(ctx context.Context, active *ActiveTunnel) {
+	defer close(active.Done)
+	target, err := primaryTarget(active.Req, active.Req.TargetPort)
 	if err != nil {
-		return err
+		m.failTunnel(active.Req.ID, err)
+		return
 	}
-	knownHostsPath, err := ensureManagedKnownHosts()
-	if err != nil {
-		_ = os.Remove(privateKeyPath)
-		return err
+	err = serveTunnelGateway(ctx, active.Req, target, active.Req.LocalPort, active.Ready)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		m.failTunnel(active.Req.ID, err)
+		return
 	}
-
-	cmd := tunnelCommand(req, privateKeyPath, knownHostsPath)
-	var stderr bytes.Buffer
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Start(); err != nil {
-		_ = os.Remove(privateKeyPath)
-		return fmt.Errorf("failed to start ssh tunnel process: %w", err)
-	}
-
-	t := &ActiveTunnel{
-		Req:            req,
-		Cmd:            cmd,
-		Quit:           make(chan struct{}),
-		PrivateKeyPath: privateKeyPath,
-	}
-
-	m.mu.Lock()
-	m.tunnels[req.ID] = t
-	m.mu.Unlock()
-
-	go func() {
-		waitErr := cmd.Wait()
-		select {
-		case <-t.Quit:
-			return
-		default:
-		}
-		stderrText := strings.TrimSpace(stderr.String())
-		if waitErr != nil {
-			if stderrText == "" {
-				stderrText = waitErr.Error()
-			}
-			log.Printf("Tunnel %s exited unexpectedly: %s", req.ID, stderrText)
-		} else if stderrText != "" {
-			log.Printf("Tunnel %s exited: %s", req.ID, stderrText)
-		}
-		m.mu.Lock()
-		if active, ok := m.tunnels[req.ID]; ok {
-			active.LastError = stderrText
-			delete(m.tunnels, req.ID)
-		}
-		m.mu.Unlock()
-		_ = os.Remove(privateKeyPath)
-	}()
-
-	sshAddr := fmt.Sprintf("%s:%d", req.SSHHost, req.SSHPort)
-	for attempt := 0; attempt < 10; attempt++ {
-		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
-			stderrText := strings.TrimSpace(stderr.String())
-			_ = m.stopTunnel(req.ID)
-			if stderrText == "" {
-				return fmt.Errorf("ssh tunnel process exited before becoming ready")
-			}
-			return fmt.Errorf("ssh tunnel failed before becoming ready: %s", stderrText)
-		}
-		if err := waitForLocalPort(req.LocalPort, 300*time.Millisecond); err == nil {
-			log.Printf("Tunnel %s started: localhost:%d -> %s:%d via %s", req.ID, req.LocalPort, req.RemoteHost, req.RemotePort, sshAddr)
-			return nil
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-
-	_ = m.stopTunnel(req.ID)
-	stderrText := strings.TrimSpace(stderr.String())
-	if stderrText == "" {
-		stderrText = "ssh tunnel did not become ready in time"
-	}
-	return fmt.Errorf("ssh tunnel startup timeout: %s", stderrText)
+	m.finishTunnel(active.Req.ID, "closed", "")
 }
 
 func (m *manager) stopTunnel(id string) error {
@@ -269,108 +256,252 @@ func (m *manager) stopTunnel(id string) error {
 		return fmt.Errorf("tunnel not found")
 	}
 	delete(m.tunnels, id)
+	t.Status = "closed"
 	m.mu.Unlock()
 
-	select {
-	case <-t.Quit:
-	default:
-		close(t.Quit)
+	if t.Cancel != nil {
+		t.Cancel()
 	}
-	if t.Cmd != nil && t.Cmd.Process != nil {
-		_ = t.Cmd.Process.Kill()
-	}
-	if strings.TrimSpace(t.PrivateKeyPath) != "" {
-		_ = os.Remove(t.PrivateKeyPath)
-	}
+	<-t.Done
 	log.Printf("Tunnel %s stopped", id)
 	return nil
 }
 
-func tunnelCommand(req TunnelRequest, privateKeyPath, knownHostsPath string) *exec.Cmd {
-	if req.SSHUser == "" {
-		req.SSHUser = "root"
-	}
-	hostAlias := "hubfly-" + strings.TrimSpace(req.ID)
-	return exec.Command(
-		"ssh",
-		"-i", privateKeyPath,
-		"-o", "ExitOnForwardFailure=yes",
-		"-o", "ConnectTimeout=10",
-		"-o", "ServerAliveInterval=30",
-		"-o", "ServerAliveCountMax=3",
-		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "UserKnownHostsFile="+knownHostsPath,
-		"-o", "HostKeyAlias="+hostAlias,
-		"-p", strconv.Itoa(req.SSHPort),
-		fmt.Sprintf("%s@%s", strings.TrimSpace(req.SSHUser), strings.TrimSpace(req.SSHHost)),
-		"-L", fmt.Sprintf("%d:%s:%d", req.LocalPort, strings.TrimSpace(req.RemoteHost), req.RemotePort),
-		"-N",
-	)
+func (m *manager) failTunnel(id string, err error) {
+	m.finishTunnel(id, "error", err.Error())
 }
 
-func writeTunnelPrivateKey(id, privateKey string) (string, error) {
-	if strings.TrimSpace(privateKey) == "" {
-		return "", errors.New("missing private key")
+func (m *manager) finishTunnel(id, status, lastError string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tunnels[id]
+	if !ok {
+		return
 	}
-	dir := filepath.Join(hubflyDir(), "service-keys")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+	t.Status = status
+	t.LastError = lastError
+	if status != "active" {
+		delete(m.tunnels, id)
 	}
-	path := filepath.Join(dir, sanitizeID(id))
-	if err := os.WriteFile(path, []byte(privateKey), 0o600); err != nil {
-		return "", err
-	}
-	return path, nil
 }
 
-func ensureManagedKnownHosts() (string, error) {
-	dir := hubflyDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+func serveTunnelGateway(
+	ctx context.Context,
+	req TunnelRequest,
+	target TunnelTarget,
+	localPort int,
+	ready chan struct{},
+) error {
+	wsConfig, err := websocket.NewConfig(req.ConnectURL, apiHost())
+	if err != nil {
+		return fmt.Errorf("invalid tunnel connect url: %w", err)
 	}
-	path := filepath.Join(dir, "known_hosts")
-	if file, err := os.OpenFile(path, os.O_CREATE, 0o600); err != nil {
-		return "", err
-	} else {
-		_ = file.Close()
+
+	dialCtx, cancelDial := context.WithTimeout(ctx, tunnelDialTimeout)
+	defer cancelDial()
+	conn, err := wsConfig.DialContext(dialCtx)
+	if err != nil {
+		return fmt.Errorf("failed to connect to tunnel gateway: %w", err)
 	}
-	return path, nil
+	defer conn.Close()
+
+	if err := sendTunnelMessage(conn, tunnelClientMessage{
+		Type:            "authenticate",
+		ProtocolVersion: max(1, req.ProtocolVersion),
+		TunnelID:        req.ID,
+		ConnectToken:    req.ConnectToken,
+	}); err != nil {
+		return fmt.Errorf("failed to authenticate tunnel session: %w", err)
+	}
+
+	for {
+		var raw []byte
+		if err := websocket.Message.Receive(conn, &raw); err != nil {
+			return fmt.Errorf("tunnel handshake failed: %w", err)
+		}
+		var msg tunnelServerMessage
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			continue
+		}
+		switch msg.Type {
+		case "hello":
+		case "authenticated":
+			goto authenticated
+		case "error":
+			return fmt.Errorf("tunnel session failed: %s", msg.Message)
+		}
+	}
+
+authenticated:
+	session, err := yamux.Client(conn, nil)
+	if err != nil {
+		return fmt.Errorf("failed to initialize tunnel session: %w", err)
+	}
+	defer session.Close()
+
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", localPort))
+	if err != nil {
+		return fmt.Errorf("failed to listen on localhost:%d: %w", localPort, err)
+	}
+	defer listener.Close()
+	close(ready)
+
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+		_ = session.Close()
+	}()
+
+	var wg sync.WaitGroup
+	acceptErrCh := make(chan error, 1)
+	go func() {
+		for {
+			clientConn, err := listener.Accept()
+			if err != nil {
+				if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+					acceptErrCh <- nil
+					return
+				}
+				acceptErrCh <- err
+				return
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := proxyTunnelConnection(ctx, session, target, clientConn); err != nil {
+					log.Printf("Tunnel proxy error for %s: %v", req.ID, err)
+				}
+			}()
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+	case err := <-acceptErrCh:
+		if err != nil {
+			return err
+		}
+	}
+
+	wg.Wait()
+	return ctx.Err()
 }
 
-func waitForLocalPort(port int, timeout time.Duration) error {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), timeout)
+func proxyTunnelConnection(
+	ctx context.Context,
+	session *yamux.Session,
+	target TunnelTarget,
+	clientConn net.Conn,
+) error {
+	defer clientConn.Close()
+
+	stream, err := session.OpenStream()
 	if err != nil {
 		return err
 	}
-	_ = conn.Close()
+	defer stream.Close()
+
+	header, err := json.Marshal(tunnelStreamConnectRequest{
+		Type:     "connect",
+		TargetID: target.TargetID,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := stream.Write(append(header, '\n')); err != nil {
+		return err
+	}
+
+	reader := bufio.NewReader(stream)
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read tunnel stream response: %w", err)
+	}
+	var response tunnelStreamConnectResponse
+	if err := json.Unmarshal(bytesTrimSpace(line), &response); err != nil {
+		return fmt.Errorf("invalid tunnel stream response: %w", err)
+	}
+	if response.Type != "connected" {
+		message := response.Message
+		if message == "" {
+			message = response.Code
+		}
+		return fmt.Errorf("tunnel stream rejected: %s", message)
+	}
+
+	copyCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(stream, clientConn)
+		cancel()
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(clientConn, reader)
+		cancel()
+	}()
+	<-copyCtx.Done()
+	_ = clientConn.Close()
+	_ = stream.Close()
+	wg.Wait()
 	return nil
 }
 
-func hubflyDir() string {
-	home, err := os.UserHomeDir()
+func sendTunnelMessage(conn *websocket.Conn, msg tunnelClientMessage) error {
+	payload, err := json.Marshal(msg)
 	if err != nil {
-		return ".hubfly"
+		return err
 	}
-	return filepath.Join(home, ".hubfly")
+	return websocket.Message.Send(conn, payload)
 }
 
-func sanitizeID(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "tunnel"
+func primaryTarget(req TunnelRequest, requestedTargetPort int) (TunnelTarget, error) {
+	if len(req.Targets) == 0 {
+		return TunnelTarget{}, errors.New("tunnel has no targets")
 	}
-	var builder strings.Builder
-	for _, ch := range value {
-		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' {
-			builder.WriteRune(ch)
-			continue
+	if requestedTargetPort > 0 {
+		for _, target := range req.Targets {
+			if target.TargetPort == requestedTargetPort {
+				return target, nil
+			}
 		}
-		builder.WriteByte('-')
 	}
-	out := strings.Trim(builder.String(), "-")
-	if out == "" {
-		return "tunnel"
+	return req.Targets[0], nil
+}
+
+func describeTarget(req TunnelRequest) string {
+	target, err := primaryTarget(req, req.TargetPort)
+	if err != nil {
+		return "unknown"
 	}
-	return out
+	host := strings.TrimSpace(target.ContainerName)
+	if host == "" {
+		host = strings.TrimSpace(target.ContainerID)
+	}
+	if host == "" {
+		host = "container"
+	}
+	return fmt.Sprintf("%s:%d", host, target.TargetPort)
+}
+
+func bytesTrimSpace(raw []byte) []byte {
+	return []byte(strings.TrimSpace(string(raw)))
+}
+
+func apiHost() string {
+	if url := os.Getenv("HUBFLY_API_URL"); url != "" {
+		return url
+	}
+	return "https://api.hubfly.space"
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
