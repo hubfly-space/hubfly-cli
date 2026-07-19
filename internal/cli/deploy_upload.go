@@ -271,6 +271,7 @@ func completeBuilderUploadSession(
 
 func attachBuilderUploadHeaders(req *http.Request, session deploySessionResponse, sourceImage string) {
 	req.Header.Set("X-Hubfly-Build-Id", session.BuildID)
+	req.Header.Set("X-Hubfly-Project-Id", session.ProjectID)
 	req.Header.Set("X-Hubfly-Upload-Token", session.Upload.Token)
 	req.Header.Set("X-Hubfly-Source-Image", sourceImage)
 }

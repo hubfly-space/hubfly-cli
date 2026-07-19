@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const cliAuthURL = "https://hubfly.space/cli/auth"
+const cliAuthURL = "https://dashboard.hubfly.space/cli/auth"
 
 func authRequiredError() error {
 	return fmt.Errorf("authentication required; open %s to create a token, then run hubfly login --token <token>", cliAuthURL)
