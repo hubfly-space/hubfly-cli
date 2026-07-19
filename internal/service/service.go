@@ -1,19 +1,20 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 type TunnelRequest struct {
@@ -37,10 +38,11 @@ type TunnelStatus struct {
 }
 
 type ActiveTunnel struct {
-	Req       TunnelRequest
-	Listener  net.Listener
-	SSHClient *ssh.Client
-	Quit      chan struct{}
+	Req            TunnelRequest
+	Cmd            *exec.Cmd
+	Quit           chan struct{}
+	PrivateKeyPath string
+	LastError      string
 }
 
 type manager struct {
@@ -169,6 +171,7 @@ func (m *manager) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			Target:    fmt.Sprintf("%s:%d", t.Req.RemoteHost, t.Req.RemotePort),
 			SSHServer: fmt.Sprintf("%s:%d", t.Req.SSHHost, t.Req.SSHPort),
 			Status:    "active",
+			Error:     t.LastError,
 		})
 	}
 
@@ -177,96 +180,85 @@ func (m *manager) handleStatus(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (m *manager) startTunnel(req TunnelRequest) error {
-	signer, err := ssh.ParsePrivateKey([]byte(req.PrivateKey))
+	privateKeyPath, err := writeTunnelPrivateKey(req.ID, req.PrivateKey)
 	if err != nil {
-		return fmt.Errorf("invalid private key: %w", err)
+		return err
 	}
-
-	knownHostsPath := os.Getenv("SSH_KNOWN_HOSTS")
-	if knownHostsPath == "" {
-		home, homeErr := os.UserHomeDir()
-		if homeErr != nil {
-			return fmt.Errorf("failed to determine user home directory for known_hosts: %w", homeErr)
-		}
-		knownHostsPath = filepath.Join(home, ".ssh", "known_hosts")
-	}
-
-	hostKeyCallback, err := knownhosts.New(knownHostsPath)
+	knownHostsPath, err := ensureManagedKnownHosts()
 	if err != nil {
-		return fmt.Errorf("failed to initialize host key callback from %s: %w", knownHostsPath, err)
+		_ = os.Remove(privateKeyPath)
+		return err
 	}
 
-	config := &ssh.ClientConfig{
-		User:            req.SSHUser,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         10 * time.Second,
+	cmd := tunnelCommand(req, privateKeyPath, knownHostsPath)
+	var stderr bytes.Buffer
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		_ = os.Remove(privateKeyPath)
+		return fmt.Errorf("failed to start ssh tunnel process: %w", err)
 	}
 
-	sshAddr := fmt.Sprintf("%s:%d", req.SSHHost, req.SSHPort)
-	client, err := ssh.Dial("tcp", sshAddr, config)
-	if err != nil {
-		return fmt.Errorf("failed to dial ssh: %w", err)
+	t := &ActiveTunnel{
+		Req:            req,
+		Cmd:            cmd,
+		Quit:           make(chan struct{}),
+		PrivateKeyPath: privateKeyPath,
 	}
-
-	localListener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", req.LocalPort))
-	if err != nil {
-		_ = client.Close()
-		return fmt.Errorf("failed to start local listener: %w", err)
-	}
-
-	t := &ActiveTunnel{Req: req, Listener: localListener, SSHClient: client, Quit: make(chan struct{})}
 
 	m.mu.Lock()
 	m.tunnels[req.ID] = t
 	m.mu.Unlock()
 
-	log.Printf("Tunnel %s started: localhost:%d -> %s:%d via %s", req.ID, req.LocalPort, req.RemoteHost, req.RemotePort, sshAddr)
-
 	go func() {
-		defer func() {
-			_ = m.stopTunnel(req.ID)
-		}()
-
-		for {
-			conn, acceptErr := localListener.Accept()
-			if acceptErr != nil {
-				select {
-				case <-t.Quit:
-					return
-				default:
-					log.Printf("Accept error on tunnel %s: %v", req.ID, acceptErr)
-					return
-				}
-			}
-			go forwardConnection(client, conn, req.RemoteHost, req.RemotePort)
+		waitErr := cmd.Wait()
+		select {
+		case <-t.Quit:
+			return
+		default:
 		}
+		stderrText := strings.TrimSpace(stderr.String())
+		if waitErr != nil {
+			if stderrText == "" {
+				stderrText = waitErr.Error()
+			}
+			log.Printf("Tunnel %s exited unexpectedly: %s", req.ID, stderrText)
+		} else if stderrText != "" {
+			log.Printf("Tunnel %s exited: %s", req.ID, stderrText)
+		}
+		m.mu.Lock()
+		if active, ok := m.tunnels[req.ID]; ok {
+			active.LastError = stderrText
+			delete(m.tunnels, req.ID)
+		}
+		m.mu.Unlock()
+		_ = os.Remove(privateKeyPath)
 	}()
 
-	return nil
-}
-
-func forwardConnection(client *ssh.Client, localConn net.Conn, remoteHost string, remotePort int) {
-	defer func() { _ = localConn.Close() }()
-
-	remoteAddr := fmt.Sprintf("%s:%d", remoteHost, remotePort)
-	remoteConn, err := client.Dial("tcp", remoteAddr)
-	if err != nil {
-		log.Printf("Failed to dial remote %s: %v", remoteAddr, err)
-		return
+	sshAddr := fmt.Sprintf("%s:%d", req.SSHHost, req.SSHPort)
+	for attempt := 0; attempt < 10; attempt++ {
+		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+			stderrText := strings.TrimSpace(stderr.String())
+			_ = m.stopTunnel(req.ID)
+			if stderrText == "" {
+				return fmt.Errorf("ssh tunnel process exited before becoming ready")
+			}
+			return fmt.Errorf("ssh tunnel failed before becoming ready: %s", stderrText)
+		}
+		if err := waitForLocalPort(req.LocalPort, 300*time.Millisecond); err == nil {
+			log.Printf("Tunnel %s started: localhost:%d -> %s:%d via %s", req.ID, req.LocalPort, req.RemoteHost, req.RemotePort, sshAddr)
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
 	}
-	defer func() { _ = remoteConn.Close() }()
 
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(localConn, remoteConn)
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(remoteConn, localConn)
-		done <- struct{}{}
-	}()
-	<-done
+	_ = m.stopTunnel(req.ID)
+	stderrText := strings.TrimSpace(stderr.String())
+	if stderrText == "" {
+		stderrText = "ssh tunnel did not become ready in time"
+	}
+	return fmt.Errorf("ssh tunnel startup timeout: %s", stderrText)
 }
 
 func (m *manager) stopTunnel(id string) error {
@@ -279,9 +271,106 @@ func (m *manager) stopTunnel(id string) error {
 	delete(m.tunnels, id)
 	m.mu.Unlock()
 
-	close(t.Quit)
-	_ = t.Listener.Close()
-	_ = t.SSHClient.Close()
+	select {
+	case <-t.Quit:
+	default:
+		close(t.Quit)
+	}
+	if t.Cmd != nil && t.Cmd.Process != nil {
+		_ = t.Cmd.Process.Kill()
+	}
+	if strings.TrimSpace(t.PrivateKeyPath) != "" {
+		_ = os.Remove(t.PrivateKeyPath)
+	}
 	log.Printf("Tunnel %s stopped", id)
 	return nil
+}
+
+func tunnelCommand(req TunnelRequest, privateKeyPath, knownHostsPath string) *exec.Cmd {
+	if req.SSHUser == "" {
+		req.SSHUser = "root"
+	}
+	hostAlias := "hubfly-" + strings.TrimSpace(req.ID)
+	return exec.Command(
+		"ssh",
+		"-i", privateKeyPath,
+		"-o", "ExitOnForwardFailure=yes",
+		"-o", "ConnectTimeout=10",
+		"-o", "ServerAliveInterval=30",
+		"-o", "ServerAliveCountMax=3",
+		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "UserKnownHostsFile="+knownHostsPath,
+		"-o", "HostKeyAlias="+hostAlias,
+		"-p", strconv.Itoa(req.SSHPort),
+		fmt.Sprintf("%s@%s", strings.TrimSpace(req.SSHUser), strings.TrimSpace(req.SSHHost)),
+		"-L", fmt.Sprintf("%d:%s:%d", req.LocalPort, strings.TrimSpace(req.RemoteHost), req.RemotePort),
+		"-N",
+	)
+}
+
+func writeTunnelPrivateKey(id, privateKey string) (string, error) {
+	if strings.TrimSpace(privateKey) == "" {
+		return "", errors.New("missing private key")
+	}
+	dir := filepath.Join(hubflyDir(), "service-keys")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, sanitizeID(id))
+	if err := os.WriteFile(path, []byte(privateKey), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func ensureManagedKnownHosts() (string, error) {
+	dir := hubflyDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "known_hosts")
+	if file, err := os.OpenFile(path, os.O_CREATE, 0o600); err != nil {
+		return "", err
+	} else {
+		_ = file.Close()
+	}
+	return path, nil
+}
+
+func waitForLocalPort(port int, timeout time.Duration) error {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), timeout)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
+
+func hubflyDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".hubfly"
+	}
+	return filepath.Join(home, ".hubfly")
+}
+
+func sanitizeID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "tunnel"
+	}
+	var builder strings.Builder
+	for _, ch := range value {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' {
+			builder.WriteRune(ch)
+			continue
+		}
+		builder.WriteByte('-')
+	}
+	out := strings.Trim(builder.String(), "-")
+	if out == "" {
+		return "tunnel"
+	}
+	return out
 }
