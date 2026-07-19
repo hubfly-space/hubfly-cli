@@ -96,6 +96,19 @@ type container struct {
 
 type projectDetails struct {
 	Containers []container `json:"containers"`
+	Volumes    []volume    `json:"volumes"`
+}
+
+type volume struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	SizeGb          string `json:"sizeGb"`
+	PerformanceMode string `json:"performanceMode"`
+	Status          string `json:"status"`
+	ReadOnly        bool   `json:"readOnly"`
+	HourlyCost      string `json:"hourlyCost"`
+	MonthlyCost     string `json:"monthlyCost"`
 }
 
 type tunnel struct {
