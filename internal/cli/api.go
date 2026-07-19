@@ -104,6 +104,24 @@ func reportDeployCallback(buildID, status, uploadToken, errorMessage string) err
 	return doJSONRequest(http.MethodPost, apiHost+"/api/builds/callback", "", body, nil)
 }
 
+func createTerminalSession(token, projectID, containerID string) (terminalSession, error) {
+	var payload terminalSession
+	url := apiHost + "/api/v1/projects/" + projectID + "/containers/" + containerID + "/terminal/session"
+	err := doJSONRequest(http.MethodPost, url, token, nil, &payload)
+	return payload, err
+}
+
+func execInContainer(token, projectID, containerID string, command []string, timeout time.Duration) (execResult, error) {
+	var payload execResult
+	url := apiHost + "/api/v1/projects/" + projectID + "/containers/" + containerID + "/exec"
+	body := map[string]any{
+		"command":   command,
+		"timeoutMs": timeout.Milliseconds(),
+	}
+	err := doJSONRequestWithTimeout(http.MethodPost, url, token, body, &payload, timeout+5*time.Second)
+	return payload, err
+}
+
 func fetchOrganizations(token string) ([]organization, error) {
 	var payload []organization
 	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/organizations", token, nil, &payload)
@@ -122,6 +140,10 @@ func fetchContainerLogs(token, projectID, containerID string) (containerLogsOutp
 }
 
 func doJSONRequest(method, url, token string, body any, out any) error {
+	return doJSONRequestWithTimeout(method, url, token, body, out, 20*time.Second)
+}
+
+func doJSONRequestWithTimeout(method, url, token string, body any, out any, timeout time.Duration) error {
 	var requestBytes []byte
 	var reqBody io.Reader
 	if body != nil {
@@ -152,7 +174,7 @@ func doJSONRequest(method, url, token string, body any, out any) error {
 		debugf("Request body: %s", string(requestBytes))
 	}
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		debugf("HTTP transport error: %v", err)
