@@ -8,6 +8,19 @@
             name="description"
             content="Install, authenticate, deploy, tunnel, inspect, and automate Hubfly from the terminal."
         />
+        <link
+            rel="icon"
+            type="image/png"
+            sizes="32x32"
+            href="./assets/favicon/favicon-32.png"
+        />
+        <link
+            rel="icon"
+            type="image/png"
+            sizes="64x64"
+            href="./assets/favicon/favicon-64.png"
+        />
+        <link rel="shortcut icon" href="./assets/favicon/favicon.ico" />
         <script src="https://cdn.tailwindcss.com"></script>
         <script>
             tailwind.config = {
@@ -90,22 +103,12 @@
                     class="flex items-center gap-3"
                     aria-label="Hubfly CLI"
                 >
-                    <span
-                        class="grid size-9 place-items-center rounded border border-soil/25 bg-white shadow-sm"
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            class="size-5 text-soil"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="2"
-                            aria-hidden="true"
-                        >
-                            <path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z" />
-                            <path d="M12 12 4.5 7.8" />
-                            <path d="M12 12v8.5" />
-                            <path d="m12 12 7.5-4.2" />
-                        </svg>
+                    <span class="overflow-hidden">
+                        <img
+                            src="./assets/brand/logo.png"
+                            alt="Hubfly"
+                            class="size-9 object-cover"
+                        />
                     </span>
                     <span class="text-sm font-semibold tracking-wide"
                         >Hubfly CLI</span
