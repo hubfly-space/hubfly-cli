@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -40,21 +41,31 @@ type TunnelTarget struct {
 }
 
 type TunnelStatus struct {
-	ID        string `json:"id"`
-	LocalPort int    `json:"local_port"`
-	Target    string `json:"target"`
-	Status    string `json:"status"`
-	Gateway   string `json:"gateway"`
-	Error     string `json:"error,omitempty"`
+	ID            string `json:"id"`
+	LocalPort     int    `json:"local_port"`
+	Target        string `json:"target"`
+	Status        string `json:"status"`
+	Gateway       string `json:"gateway"`
+	ActiveStreams int64  `json:"active_streams"`
+	StreamsOpened int64  `json:"streams_opened"`
+	BytesSent     uint64 `json:"bytes_sent"`
+	BytesReceived uint64 `json:"bytes_received"`
+	StartedAt     string `json:"started_at,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 type ActiveTunnel struct {
-	Req       TunnelRequest
-	Cancel    context.CancelFunc
-	Done      chan struct{}
-	Ready     chan struct{}
-	Status    string
-	LastError string
+	Req           TunnelRequest
+	Cancel        context.CancelFunc
+	Done          chan struct{}
+	Ready         chan struct{}
+	Status        string
+	LastError     string
+	StartedAt     time.Time
+	ActiveStreams atomic.Int64
+	StreamsOpened atomic.Int64
+	BytesSent     atomic.Uint64
+	BytesReceived atomic.Uint64
 }
 
 type manager struct {
@@ -151,14 +162,16 @@ func (m *manager) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	active := &ActiveTunnel{
-		Req:    req,
-		Cancel: cancel,
-		Done:   make(chan struct{}),
-		Ready:  make(chan struct{}),
-		Status: "starting",
+		Req:       req,
+		Cancel:    cancel,
+		Done:      make(chan struct{}),
+		Ready:     make(chan struct{}),
+		Status:    "starting",
+		StartedAt: time.Now().UTC(),
 	}
 	m.tunnels[req.ID] = active
 	m.mu.Unlock()
+	log.Printf("[tunnel] starting %s | localhost:%d -> %s | gateway=%s", req.ID, req.LocalPort, describeTarget(req), req.ConnectURL)
 
 	go m.runTunnel(ctx, active)
 
@@ -220,12 +233,17 @@ func (m *manager) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	statuses := make([]TunnelStatus, 0, len(m.tunnels))
 	for id, t := range m.tunnels {
 		statuses = append(statuses, TunnelStatus{
-			ID:        id,
-			LocalPort: t.Req.LocalPort,
-			Target:    describeTarget(t.Req),
-			Gateway:   t.Req.ConnectURL,
-			Status:    t.Status,
-			Error:     t.LastError,
+			ID:            id,
+			LocalPort:     t.Req.LocalPort,
+			Target:        describeTarget(t.Req),
+			Gateway:       t.Req.ConnectURL,
+			Status:        t.Status,
+			ActiveStreams: t.ActiveStreams.Load(),
+			StreamsOpened: t.StreamsOpened.Load(),
+			BytesSent:     t.BytesSent.Load(),
+			BytesReceived: t.BytesReceived.Load(),
+			StartedAt:     t.StartedAt.Format(time.RFC3339),
+			Error:         t.LastError,
 		})
 	}
 
@@ -242,18 +260,25 @@ func (m *manager) runTunnel(ctx context.Context, active *ActiveTunnel) {
 	}
 	err = serveTunnelGateway(
 		ctx,
-		active.Req,
+		active,
 		target,
-		active.Req.LocalPort,
-		active.Ready,
 		func() {
 			m.setTunnelStatus(active.Req.ID, "active", "")
+			log.Printf("[tunnel] active %s | localhost:%d -> %s", active.Req.ID, active.Req.LocalPort, describeTarget(active.Req))
 		},
 	)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		m.failTunnel(active.Req.ID, err)
 		return
 	}
+	log.Printf(
+		"[tunnel] closed %s | streams=%d active=%d sent=%dB recv=%dB",
+		active.Req.ID,
+		active.StreamsOpened.Load(),
+		active.ActiveStreams.Load(),
+		active.BytesSent.Load(),
+		active.BytesReceived.Load(),
+	)
 	m.finishTunnel(active.Req.ID, "closed", "")
 }
 
@@ -272,11 +297,19 @@ func (m *manager) stopTunnel(id string) error {
 		t.Cancel()
 	}
 	<-t.Done
-	log.Printf("Tunnel %s stopped", id)
+	log.Printf(
+		"[tunnel] stopped %s | streams=%d active=%d sent=%dB recv=%dB",
+		id,
+		t.StreamsOpened.Load(),
+		t.ActiveStreams.Load(),
+		t.BytesSent.Load(),
+		t.BytesReceived.Load(),
+	)
 	return nil
 }
 
 func (m *manager) failTunnel(id string, err error) {
+	log.Printf("[tunnel] error %s | %v", id, err)
 	m.finishTunnel(id, "error", err.Error())
 }
 
@@ -307,12 +340,11 @@ func (m *manager) finishTunnel(id, status, lastError string) {
 
 func serveTunnelGateway(
 	ctx context.Context,
-	req TunnelRequest,
+	active *ActiveTunnel,
 	target TunnelTarget,
-	localPort int,
-	ready chan struct{},
 	onReady func(),
 ) error {
+	req := active.Req
 	wsConfig, err := websocket.NewConfig(req.ConnectURL, apiHost())
 	if err != nil {
 		return fmt.Errorf("invalid tunnel connect url: %w", err)
@@ -360,15 +392,15 @@ authenticated:
 	}
 	defer session.Close()
 
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", localPort))
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", req.LocalPort))
 	if err != nil {
-		return fmt.Errorf("failed to listen on localhost:%d: %w", localPort, err)
+		return fmt.Errorf("failed to listen on localhost:%d: %w", req.LocalPort, err)
 	}
 	defer listener.Close()
 	if onReady != nil {
 		onReady()
 	}
-	close(ready)
+	close(active.Ready)
 
 	go func() {
 		<-ctx.Done()
@@ -392,7 +424,7 @@ authenticated:
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if err := proxyTunnelConnection(ctx, session, target, clientConn); err != nil {
+				if err := proxyTunnelConnection(ctx, active, session, target, clientConn); err != nil {
 					log.Printf("Tunnel proxy error for %s: %v", req.ID, err)
 				}
 			}()
@@ -413,11 +445,32 @@ authenticated:
 
 func proxyTunnelConnection(
 	ctx context.Context,
+	active *ActiveTunnel,
 	session *yamux.Session,
 	target TunnelTarget,
 	clientConn net.Conn,
 ) error {
 	defer clientConn.Close()
+	streamNumber := active.StreamsOpened.Add(1)
+	active.ActiveStreams.Add(1)
+	log.Printf(
+		"[tunnel] stream-open %s#%d | %s -> %s",
+		active.Req.ID,
+		streamNumber,
+		clientConn.RemoteAddr().String(),
+		describeTarget(active.Req),
+	)
+	defer func() {
+		active.ActiveStreams.Add(-1)
+		log.Printf(
+			"[tunnel] stream-close %s#%d | active=%d sent=%dB recv=%dB",
+			active.Req.ID,
+			streamNumber,
+			active.ActiveStreams.Load(),
+			active.BytesSent.Load(),
+			active.BytesReceived.Load(),
+		)
+	}()
 
 	stream, err := session.OpenStream()
 	if err != nil {
@@ -460,12 +513,18 @@ func proxyTunnelConnection(
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(stream, clientConn)
+		n, _ := io.Copy(stream, clientConn)
+		if n > 0 {
+			active.BytesSent.Add(uint64(n))
+		}
 		cancel()
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(clientConn, reader)
+		n, _ := io.Copy(clientConn, reader)
+		if n > 0 {
+			active.BytesReceived.Add(uint64(n))
+		}
 		cancel()
 	}()
 	<-copyCtx.Done()
