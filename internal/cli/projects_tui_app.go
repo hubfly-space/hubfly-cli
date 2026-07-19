@@ -3,12 +3,9 @@ package cli
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -84,7 +81,6 @@ type singleStartMsg struct {
 type multiTunnelPlan struct {
 	tunnel    tunnel
 	localPort int
-	keyPath   string
 }
 
 type multiStartMsg struct {
@@ -254,7 +250,7 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.singleRunningPort = msg.localPort
 		m.singleRunningState = "running"
 		m.view = viewRunningSingle
-		m.status = fmt.Sprintf("Tunnel open: localhost:%d -> %s:%d", msg.localPort, resolveTunnelForwardHost(m.selectedTunnel), m.selectedTunnel.TargetPort)
+		m.status = fmt.Sprintf("Tunnel open: localhost:%d -> %s:%d", msg.localPort, resolveTunnelForwardHost(m.selectedTunnel), selectedPrimaryPort(m.selectedTunnel))
 		return m, waitSingleTunnelDoneCmd(msg.cmd, msg.stderrBuf)
 	case singleSSHDoneMsg:
 		if m.singleRunningCmd == nil && m.view != viewRunningSingle {
@@ -354,21 +350,20 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.view = viewContainerMenu
 					m.setContainerActionItems()
 					m.status = "Creating tunnel..."
-					return m, createTunnelWithKeyCmd(m.token, m.selectedProject.ID, m.selectedContainer, port)
+					return m, createTunnelTicketCmd(m.token, m.selectedProject.ID, m.selectedContainer, port)
 				case portInputSingle:
 					m.status = "Starting tunnel session..."
 					return m, startSingleTunnelCmd(
 						m.selectedTunnel,
-						filepath.Join(keysDir(), "tunnel-"+m.selectedTunnel.TunnelID),
 						port,
-						m.selectedTunnel.TargetPort,
+						selectedPrimaryPort(m.selectedTunnel),
 					)
 				case portInputMultiCustom:
 					m.multiCustomPorts = append(m.multiCustomPorts, port)
 					m.multiCustomIndex++
 					if m.multiCustomIndex < len(m.multiCustomList) {
 						next := m.multiCustomList[m.multiCustomIndex]
-						m.setPortInput(portInputMultiCustom, fmt.Sprintf("Local port for %s", next.TunnelID), next.TargetPort)
+						m.setPortInput(portInputMultiCustom, fmt.Sprintf("Local port for %s", next.TunnelID), selectedPrimaryPort(next))
 						return m, nil
 					}
 					plans := make([]multiTunnelPlan, 0, len(m.multiCustomList))
@@ -376,7 +371,6 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						plans = append(plans, multiTunnelPlan{
 							tunnel:    t,
 							localPort: m.multiCustomPorts[i],
-							keyPath:   filepath.Join(keysDir(), "tunnel-"+t.TunnelID),
 						})
 					}
 					m.status = "Starting multiple tunnels..."
@@ -523,15 +517,14 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "Tunnel expired"
 					return m, nil
 				}
-				keyPath := filepath.Join(keysDir(), "tunnel-"+candidate.TunnelID)
-				if _, err := os.Stat(keyPath); err != nil {
-					m.errMsg = fmt.Sprintf("Local key not found for tunnel %s. Recreate tunnel from this machine.", candidate.TunnelID)
-					m.status = "Missing local key"
-					debugf("tunnel key missing: %s", keyPath)
+				if _, err := loadTunnelTicket(candidate.TunnelID); err != nil {
+					m.errMsg = fmt.Sprintf("Local tunnel session token not found for %s. Recreate tunnel from this machine.", candidate.TunnelID)
+					m.status = "Missing local tunnel ticket"
+					debugf("tunnel ticket missing: %s", candidate.TunnelID)
 					return m, nil
 				}
 				m.selectedTunnel = candidate
-				m.setPortInput(portInputSingle, "Local forward port", m.selectedTunnel.TargetPort)
+				m.setPortInput(portInputSingle, "Local forward port", selectedPrimaryPort(m.selectedTunnel))
 				return m, nil
 			}
 		case viewTunnelsMulti:
@@ -596,8 +589,7 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					for _, t := range m.multiCustomList {
 						plans = append(plans, multiTunnelPlan{
 							tunnel:    t,
-							localPort: t.TargetPort,
-							keyPath:   filepath.Join(keysDir(), "tunnel-"+t.TunnelID),
+							localPort: selectedPrimaryPort(t),
 						})
 					}
 					m.status = "Starting multiple tunnels..."
@@ -611,7 +603,7 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					first := m.multiCustomList[0]
-					m.setPortInput(portInputMultiCustom, fmt.Sprintf("Local port for %s", first.TunnelID), first.TargetPort)
+					m.setPortInput(portInputMultiCustom, fmt.Sprintf("Local port for %s", first.TunnelID), selectedPrimaryPort(first))
 					return m, nil
 				default:
 					m.view = viewTunnelsMulti
@@ -690,7 +682,7 @@ func (m projectsApp) View() string {
 			m.selectedTunnel.TunnelID,
 			m.singleRunningPort,
 			resolveTunnelForwardHost(m.selectedTunnel),
-			m.selectedTunnel.TargetPort,
+			selectedPrimaryPort(m.selectedTunnel),
 		))
 		b.WriteString("\nUse this endpoint locally now.\n")
 		if m.singleRunningState == "error" {
@@ -715,7 +707,7 @@ func (m projectsApp) View() string {
 				plan.tunnel.TunnelID,
 				plan.localPort,
 				resolveTunnelForwardHost(plan.tunnel),
-				plan.tunnel.TargetPort,
+				selectedPrimaryPort(plan.tunnel),
 				state,
 			))
 		}
@@ -772,9 +764,9 @@ func (m *projectsApp) setContainerItems() {
 
 func (m *projectsApp) setContainerActionItems() {
 	items := []list.Item{
-		appItem{title: "Create New Tunnel", desc: "Create tunnel with generated SSH key", idx: 0},
-		appItem{title: "Connect One Tunnel", desc: "Open one SSH tunnel session", idx: 1},
-		appItem{title: "Connect Multiple Tunnels", desc: "Run many SSH tunnels concurrently", idx: 2},
+		appItem{title: "Create New Tunnel", desc: "Create a direct tunnel session ticket", idx: 0},
+		appItem{title: "Connect One Tunnel", desc: "Open one direct tunnel session", idx: 1},
+		appItem{title: "Connect Multiple Tunnels", desc: "Run many direct tunnels concurrently", idx: 2},
 		appItem{title: "Refresh Tunnels", desc: "Reload current tunnel list", idx: 3},
 		appItem{title: "Back", desc: "Return to container list", idx: 4},
 	}
@@ -784,14 +776,13 @@ func (m *projectsApp) setContainerActionItems() {
 func (m *projectsApp) setTunnelSingleItems() {
 	items := make([]list.Item, 0, len(m.tunnels))
 	for i, t := range m.tunnels {
-		keyPath := filepath.Join(keysDir(), "tunnel-"+t.TunnelID)
-		keyState := "key:ok"
-		if _, err := os.Stat(keyPath); err != nil {
-			keyState = "key:missing"
+		ticketState := "ticket:ok"
+		if _, err := loadTunnelTicket(t.TunnelID); err != nil {
+			ticketState = "ticket:missing"
 		}
 		items = append(items, appItem{
 			title: t.TunnelID,
-			desc:  fmt.Sprintf("%s:%d -> %s:%d | %s | %s", t.SSHHost, t.SSHPort, t.TargetNetwork.IPAddress, t.TargetPort, tunnelState(t.ExpiresAt), keyState),
+			desc:  fmt.Sprintf("gateway -> %s:%d | %s | %s", resolveTunnelForwardHost(t), selectedPrimaryPort(t), tunnelState(t.ExpiresAt), ticketState),
 			idx:   i,
 		})
 	}
@@ -811,7 +802,7 @@ func (m *projectsApp) setTunnelMultiItems(preserveIdx *int) {
 		}
 		items = append(items, appItem{
 			title: fmt.Sprintf("%s %s", mark, t.TunnelID),
-			desc:  fmt.Sprintf("%s:%d -> %s:%d", t.SSHHost, t.SSHPort, t.TargetNetwork.IPAddress, t.TargetPort),
+			desc:  fmt.Sprintf("gateway -> %s:%d", resolveTunnelForwardHost(t), selectedPrimaryPort(t)),
 			idx:   i,
 		})
 	}
@@ -874,51 +865,41 @@ func fetchTunnelsCmd(token, projectID string) tea.Cmd {
 	}
 }
 
-func createTunnelWithKeyCmd(token, projectID string, c container, targetPort int) tea.Cmd {
+func createTunnelTicketCmd(token, projectID string, c container, targetPort int) tea.Cmd {
 	return func() tea.Msg {
-		err := createTunnelWithKey(token, projectID, c, targetPort)
+		err := createTunnelTicket(token, projectID, c, targetPort)
 		return tunnelCreatedMsg{err: err}
 	}
 }
 
-func createTunnelWithKey(token, projectID string, c container, targetPort int) error {
-	tempID := fmt.Sprintf("temp-%d-%d-%d", syscall.Getpid(), targetPort, time.Now().UnixNano())
-	publicKeyJWK, privateKeyPEM, err := generateKeyPairAndSave(tempID)
-	if err != nil {
-		return err
-	}
-
+func createTunnelTicket(token, projectID string, c container, targetPort int) error {
 	t, err := createTunnel(token, projectID, createTunnelRequest{
-		ContainerID:   c.ID,
-		TargetPort:    targetPort,
-		PublicKeyJWK:  publicKeyJWK,
-		PrivateKeyPEM: privateKeyPEM,
+		ContainerID: c.ID,
+		TargetPort:  targetPort,
+		LocalPort:   targetPort,
 	})
 	if err != nil {
-		_ = removeKeyPair(tempID)
 		return err
 	}
-
-	_, err = renameKeyFiles(tempID, "tunnel-"+t.TunnelID)
-	return err
+	return saveTunnelTicket(t)
 }
 
-func startSingleTunnelCmd(t tunnel, keyPath string, localPort, targetPort int) tea.Cmd {
+func startSingleTunnelCmd(t tunnel, localPort, targetPort int) tea.Cmd {
 	return func() tea.Msg {
 		if tunnelIsExpired(t.ExpiresAt) {
 			return singleStartMsg{err: fmt.Errorf("tunnel %s is expired", t.TunnelID)}
 		}
-		if _, err := os.Stat(keyPath); err != nil {
-			return singleStartMsg{err: fmt.Errorf("local key not found for tunnel %s", t.TunnelID)}
+		if _, err := loadTunnelTicket(t.TunnelID); err != nil {
+			return singleStartMsg{err: fmt.Errorf("local tunnel ticket not found for tunnel %s", t.TunnelID)}
 		}
 
 		stderrBuf := &bytes.Buffer{}
-		cmd := tunnelCommand(t, keyPath, localPort, targetPort)
-		cmd.Stdout = stderrBuf
-		cmd.Stderr = stderrBuf
-		if err := cmd.Start(); err != nil {
+		cmd, err := startTunnelConnectionBackground(t, "", localPort, targetPort)
+		if err != nil {
 			return singleStartMsg{err: err}
 		}
+		cmd.Stdout = stderrBuf
+		cmd.Stderr = stderrBuf
 
 		debugf("started tunnel %s localhost:%d -> %s:%d", t.TunnelID, localPort, resolveTunnelForwardHost(t), targetPort)
 		return singleStartMsg{cmd: cmd, localPort: localPort, stderrBuf: stderrBuf}
@@ -947,14 +928,14 @@ func startMultiTunnelsCmd(plans []multiTunnelPlan) tea.Cmd {
 				}
 				return multiStartMsg{err: fmt.Errorf("tunnel %s is expired", plan.tunnel.TunnelID)}
 			}
-			if _, err := os.Stat(plan.keyPath); err != nil {
+			if _, err := loadTunnelTicket(plan.tunnel.TunnelID); err != nil {
 				for _, started := range cmds {
 					_ = stopSSHProcess(started)
 				}
-				return multiStartMsg{err: fmt.Errorf("missing local key for tunnel %s", plan.tunnel.TunnelID)}
+				return multiStartMsg{err: fmt.Errorf("missing local tunnel ticket for tunnel %s", plan.tunnel.TunnelID)}
 			}
 
-			cmd, err := startTunnelConnectionBackground(plan.tunnel, plan.keyPath, plan.localPort, plan.tunnel.TargetPort)
+			cmd, err := startTunnelConnectionBackground(plan.tunnel, "", plan.localPort, selectedPrimaryPort(plan.tunnel))
 			if err != nil {
 				for _, started := range cmds {
 					_ = stopSSHProcess(started)

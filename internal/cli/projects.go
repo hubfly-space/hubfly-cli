@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -119,9 +118,9 @@ func manageContainer(token, projectID string, c container) error {
 		}
 
 		action, cancelled, err := pickAction("Container Actions", "Use arrows and Enter", []listOption{
-			{Title: "Create New Tunnel", Desc: "Generate key and create a tunnel for this container"},
-			{Title: "Connect One Tunnel", Desc: "Open a single SSH tunnel"},
-			{Title: "Connect Multiple Tunnels", Desc: "Run several SSH tunnels at the same time"},
+			{Title: "Create New Tunnel", Desc: "Create a direct tunnel session for this container"},
+			{Title: "Connect One Tunnel", Desc: "Open a direct tunnel session"},
+			{Title: "Connect Multiple Tunnels", Desc: "Run several direct tunnels at the same time"},
 			{Title: "Refresh", Desc: "Reload container and tunnel state"},
 			{Title: "Back", Desc: "Return to project view"},
 		})
@@ -158,16 +157,15 @@ func manageContainer(token, projectID string, c container) error {
 			if cancelled {
 				continue
 			}
-			local, lErr := promptNumberWithDefault("Enter local port to forward to", selected.TargetPort)
+			local, lErr := promptNumberWithDefault("Enter local port to forward to", selectedPrimaryPort(selected))
 			if lErr != nil {
 				return lErr
 			}
 			if local <= 0 {
 				continue
 			}
-			keyPath := filepath.Join(keysDir(), "tunnel-"+selected.TunnelID)
 			renderScreen("Tunnel Session", fmt.Sprintf("Tunnel %s", selected.TunnelID))
-			if err := runTunnelConnection(selected, keyPath, local, selected.TargetPort); err != nil {
+			if err := runTunnelConnection(selected, "", local, selectedPrimaryPort(selected)); err != nil {
 				waitForEnter(fmt.Sprintf("Tunnel connection failed: %v\nPress Enter to continue...", err))
 			}
 		case 2:
@@ -203,14 +201,13 @@ func connectMultipleTunnels(tunnels []tunnel) error {
 	type plannedTunnel struct {
 		tunnel    tunnel
 		localPort int
-		keyPath   string
 	}
 
 	plans := make([]plannedTunnel, 0, len(selected))
 	for _, t := range selected {
-		localPort := t.TargetPort
+		localPort := selectedPrimaryPort(t)
 		if !useDefaults {
-			localPort, err = promptNumberWithDefault(fmt.Sprintf("Local port for %s", t.TunnelID), t.TargetPort)
+			localPort, err = promptNumberWithDefault(fmt.Sprintf("Local port for %s", t.TunnelID), selectedPrimaryPort(t))
 			if err != nil {
 				return err
 			}
@@ -221,15 +218,14 @@ func connectMultipleTunnels(tunnels []tunnel) error {
 		plans = append(plans, plannedTunnel{
 			tunnel:    t,
 			localPort: localPort,
-			keyPath:   filepath.Join(keysDir(), "tunnel-"+t.TunnelID),
 		})
 	}
 
 	renderScreen("Multi Tunnel Connect", "Starting selected tunnels")
 	cmds := make([]*exec.Cmd, 0, len(plans))
 	for _, p := range plans {
-		fmt.Printf("Starting %s on localhost:%d -> %s:%d\n", p.tunnel.TunnelID, p.localPort, p.tunnel.TargetNetwork.IPAddress, p.tunnel.TargetPort)
-		cmd, startErr := startTunnelConnectionBackground(p.tunnel, p.keyPath, p.localPort, p.tunnel.TargetPort)
+		fmt.Printf("Starting %s on localhost:%d -> %s:%d\n", p.tunnel.TunnelID, p.localPort, resolveTunnelForwardHost(p.tunnel), selectedPrimaryPort(p.tunnel))
+		cmd, startErr := startTunnelConnectionBackground(p.tunnel, "", p.localPort, selectedPrimaryPort(p.tunnel))
 		if startErr != nil {
 			for _, running := range cmds {
 				_ = stopSSHProcess(running)
@@ -305,29 +301,19 @@ func stopSSHProcess(cmd *exec.Cmd) error {
 }
 
 func createAndStoreTunnel(token, projectID string, c container, targetPort int) error {
-	fmt.Println("Generating SSH keys...")
-	tempID := fmt.Sprintf("temp-%d", time.Now().UnixNano())
-	publicKeyJWK, privateKeyPEM, err := generateKeyPairAndSave(tempID)
-	if err != nil {
-		return err
-	}
-
 	fmt.Println("Creating tunnel on server...")
 	t, err := createTunnel(token, projectID, createTunnelRequest{
-		ContainerID:   c.ID,
-		TargetPort:    targetPort,
-		PublicKeyJWK:  publicKeyJWK,
-		PrivateKeyPEM: privateKeyPEM,
+		ContainerID: c.ID,
+		TargetPort:  targetPort,
+		LocalPort:   targetPort,
 	})
 	if err != nil {
-		_ = removeKeyPair(tempID)
 		return err
 	}
-
-	if _, err := renameKeyFiles(tempID, "tunnel-"+t.TunnelID); err != nil {
+	if err := saveTunnelTicket(t); err != nil {
 		return err
 	}
-	fmt.Println("Tunnel created successfully. Keys saved.")
+	fmt.Println("Tunnel created successfully. Local session ticket saved.")
 	return nil
 }
 
@@ -344,62 +330,19 @@ func tunnelFlow(containerIDOrName string, localPort, targetPort int) error {
 	}
 	fmt.Printf("Found container: %s (%s)\n", targetContainer.Name, targetContainer.ID)
 
-	fmt.Println("Checking for existing tunnels...")
-	tunnels, err := fetchTunnels(token, targetProjectID)
+	fmt.Println("Creating tunnel session...")
+	tunnelToUse, err := createTunnel(token, targetProjectID, createTunnelRequest{
+		ContainerID: targetContainer.ID,
+		TargetPort:  targetPort,
+		LocalPort:   localPort,
+	})
 	if err != nil {
 		return err
 	}
-
-	var tunnelToUse *tunnel
-	var keyPathToUse string
-	now := time.Now()
-	for _, t := range tunnels {
-		if t.TargetContainerID != targetContainer.ID {
-			continue
-		}
-		if t.TargetPort != targetPort {
-			continue
-		}
-		expiresAt, parseErr := time.Parse(time.RFC3339, t.ExpiresAt)
-		if parseErr == nil && expiresAt.Before(now) {
-			continue
-		}
-		keyPath := filepath.Join(keysDir(), "tunnel-"+t.TunnelID)
-		if _, statErr := os.Stat(keyPath); statErr == nil {
-			copyTunnel := t
-			tunnelToUse = &copyTunnel
-			keyPathToUse = keyPath
-			break
-		}
+	if err := saveTunnelTicket(tunnelToUse); err != nil {
+		return err
 	}
-
-	if tunnelToUse == nil {
-		fmt.Println("No suitable existing tunnel found. Creating new tunnel...")
-		tempID := fmt.Sprintf("temp-%d", time.Now().UnixNano())
-		publicKeyJWK, privateKeyPEM, genErr := generateKeyPairAndSave(tempID)
-		if genErr != nil {
-			return genErr
-		}
-
-		newTunnel, createErr := createTunnel(token, targetProjectID, createTunnelRequest{
-			ContainerID:   targetContainer.ID,
-			TargetPort:    targetPort,
-			PublicKeyJWK:  publicKeyJWK,
-			PrivateKeyPEM: privateKeyPEM,
-		})
-		if createErr != nil {
-			_ = removeKeyPair(tempID)
-			return createErr
-		}
-		newKeyPath, renameErr := renameKeyFiles(tempID, "tunnel-"+newTunnel.TunnelID)
-		if renameErr != nil {
-			return renameErr
-		}
-		tunnelToUse = &newTunnel
-		keyPathToUse = newKeyPath
-	}
-
-	return runTunnelConnection(*tunnelToUse, keyPathToUse, localPort, targetPort)
+	return runTunnelConnection(tunnelToUse, "", localPort, targetPort)
 }
 
 func printProjectsTable(projects []project) {
@@ -423,10 +366,10 @@ func printContainersTable(containers []container) {
 
 func printTunnelsTable(tunnels []tunnel) {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "#\tTunnel ID\tSSH\tTarget\tExpires\tState")
+	_, _ = fmt.Fprintln(tw, "#\tTunnel ID\tMode\tTarget\tExpires\tState")
 	for i, t := range tunnels {
-		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s:%d\t%s:%d\t%s\t%s\n",
-			i+1, t.TunnelID, t.SSHHost, t.SSHPort, t.TargetNetwork.IPAddress, t.TargetPort, t.ExpiresAt, tunnelState(t.ExpiresAt))
+		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s:%d\t%s\t%s\n",
+			i+1, t.TunnelID, valueOrDash(t.Mode), resolveTunnelForwardHost(t), selectedPrimaryPort(t), t.ExpiresAt, tunnelState(t.ExpiresAt))
 	}
 	_ = tw.Flush()
 }
@@ -487,7 +430,7 @@ func selectTunnel(tunnels []tunnel) (tunnel, bool, error) {
 	for _, t := range tunnels {
 		options = append(options, listOption{
 			Title: fmt.Sprintf("%s", t.TunnelID),
-			Desc:  fmt.Sprintf("SSH: %s:%d | Target: %s:%d | State: %s", t.SSHHost, t.SSHPort, t.TargetNetwork.IPAddress, t.TargetPort, tunnelState(t.ExpiresAt)),
+			Desc:  fmt.Sprintf("Mode: %s | Target: %s:%d | State: %s", valueOrDash(t.Mode), resolveTunnelForwardHost(t), selectedPrimaryPort(t), tunnelState(t.ExpiresAt)),
 		})
 	}
 	idx, cancelled, err := tuiPickOne("Tunnels", "Type to filter, Enter to select, q to cancel", options)
@@ -505,7 +448,7 @@ func selectMultipleTunnels(tunnels []tunnel) ([]tunnel, bool, error) {
 	for _, t := range tunnels {
 		options = append(options, listOption{
 			Title: fmt.Sprintf("%s", t.TunnelID),
-			Desc:  fmt.Sprintf("%s:%d -> %s:%d", t.SSHHost, t.SSHPort, t.TargetNetwork.IPAddress, t.TargetPort),
+			Desc:  fmt.Sprintf("gateway -> %s:%d", resolveTunnelForwardHost(t), selectedPrimaryPort(t)),
 		})
 	}
 	indices, cancelled, err := tuiPickMany("Multi Tunnel Selection", "Space to toggle, Enter to confirm, q to cancel", options)
@@ -533,6 +476,14 @@ func valueOrDash(v string) string {
 		return "-"
 	}
 	return v
+}
+
+func selectedPrimaryPort(t tunnel) int {
+	target, err := primaryTunnelTarget(t, 0)
+	if err != nil {
+		return 0
+	}
+	return target.TargetPort
 }
 
 func findContainer(token string, containerIDOrName string) (*container, string, error) {
