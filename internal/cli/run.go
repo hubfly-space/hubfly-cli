@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 )
 
 func Run(args []string) int {
@@ -69,6 +70,26 @@ func run(args []string) error {
 			return errors.New("invalid target port")
 		}
 		return tunnelFlow(args[1], localPort, targetPort)
+	case "ssh":
+		if len(args) != 2 {
+			return errors.New("usage: hubfly ssh <containerIdOrName>")
+		}
+		return sshFlow(args[1])
+	case "exec":
+		if len(args) < 2 {
+			return errors.New("usage: hubfly exec <containerIdOrName> -- <cmd> [args...]")
+		}
+		dashIdx := -1
+		for i, a := range args {
+			if a == "--" {
+				dashIdx = i
+				break
+			}
+		}
+		if dashIdx == -1 || dashIdx == len(args)-1 {
+			return errors.New("usage: hubfly exec <containerIdOrName> -- <cmd> [args...] (missing -- or command)")
+		}
+		return execFlow(args[1], args[dashIdx+1:], 55*time.Second)
 	case "orgs", "org", "organizations":
 		return organizationsFlow()
 	case "logs":
@@ -108,6 +129,8 @@ func printUsage() {
 	fmt.Println("       [--config <path>] [--detach] [--dockerfile <path>] [--builder-version <tag>]")
 	fmt.Println("  hubfly [--debug] build <init|validate|edit|explain>")
 	fmt.Println("  hubfly [--debug] tunnel <containerIdOrName> <localPort> <targetPort>")
+	fmt.Println("  hubfly [--debug] ssh <containerIdOrName>")
+	fmt.Println("  hubfly [--debug] exec <containerIdOrName> -- <cmd> [args...]")
 	fmt.Println("  hubfly [--debug] version")
 	fmt.Println("  hubfly [--debug] update [--check]")
 	fmt.Println("  hubfly service [--port <port>]")
