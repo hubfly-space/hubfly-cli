@@ -112,34 +112,47 @@ type volume struct {
 }
 
 type tunnel struct {
-	TunnelID          string `json:"tunnelId"`
-	ID                string `json:"id"`
-	SSHHost           string `json:"sshHost"`
-	SSHPort           int    `json:"sshPort"`
-	SSHUser           string `json:"sshUser"`
-	TargetPort        int    `json:"targetPort"`
-	TargetContainer   string `json:"targetContainer"`
-	TargetContainerID string `json:"targetContainerId"`
-	DockerName        string `json:"dockerName"`
-	Instructions      string `json:"instructions"`
-	TargetNetwork     struct {
-		IPAddress string   `json:"ipAddress"`
-		Aliases   []string `json:"aliases"`
-	} `json:"targetNetwork"`
-	ExpiresAt string `json:"expiresAt"`
-}
-
-type jwk struct {
-	Kty string `json:"kty"`
-	N   string `json:"n"`
-	E   string `json:"e"`
+	TunnelID          string         `json:"tunnelId"`
+	ID                string         `json:"id"`
+	ProjectID         string         `json:"projectId"`
+	ProjectName       string         `json:"projectName"`
+	TargetContainer   string         `json:"targetContainerName"`
+	TargetContainerID string         `json:"targetContainerId"`
+	TargetPort        int            `json:"targetPort"`
+	ConnectURL        string         `json:"connectUrl"`
+	ConnectToken      string         `json:"connectToken,omitempty"`
+	ProtocolVersion   int            `json:"protocolVersion"`
+	Mode              string         `json:"mode"`
+	Status            string         `json:"status"`
+	Targets           []tunnelTarget `json:"targets"`
+	Limits            tunnelLimits   `json:"limits"`
+	BytesSent         string         `json:"bytesSent"`
+	BytesReceived     string         `json:"bytesReceived"`
+	StreamsOpened     int            `json:"streamsOpened"`
+	CloseReason       string         `json:"closeReason"`
+	ExpiresAt         string         `json:"expiresAt"`
 }
 
 type createTunnelRequest struct {
-	ContainerID   string `json:"containerId"`
-	TargetPort    int    `json:"targetPort"`
-	PublicKeyJWK  jwk    `json:"publicKeyJwk"`
-	PrivateKeyPEM string `json:"privateKeyPem"`
+	ContainerID string `json:"containerId"`
+	TargetPort  int    `json:"targetPort"`
+	LocalPort   int    `json:"localPort,omitempty"`
+	TTLSeconds  int    `json:"ttlSeconds,omitempty"`
+}
+
+type tunnelTarget struct {
+	TargetID       string `json:"targetId"`
+	ContainerID    string `json:"containerId"`
+	ContainerName  string `json:"containerName"`
+	RuntimeID      string `json:"runtimeId"`
+	TargetPort     int    `json:"targetPort"`
+	LocalPort      int    `json:"localPort"`
+}
+
+type tunnelLimits struct {
+	MaxStreams         int `json:"maxStreams"`
+	IdleTimeoutSeconds int `json:"idleTimeoutSeconds"`
+	MaxDurationSeconds int `json:"maxDurationSeconds"`
 }
 
 type terminalSession struct {

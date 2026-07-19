@@ -15,6 +15,10 @@ func keysDir() string {
 	return filepath.Join(hubflyDir(), "keys")
 }
 
+func tunnelsDir() string {
+	return filepath.Join(hubflyDir(), "tunnels")
+}
+
 func configPath() string {
 	return filepath.Join(hubflyDir(), "config.json")
 }

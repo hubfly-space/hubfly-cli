@@ -72,6 +72,19 @@ func run(args []string) error {
 			return errors.New("invalid target port")
 		}
 		return tunnelFlow(args[1], localPort, targetPort)
+	case "__connect-tunnel":
+		if len(args) != 4 {
+			return errors.New("usage: hubfly __connect-tunnel <tunnelId> <localPort> <targetPort>")
+		}
+		localPort, err := strconv.Atoi(args[2])
+		if err != nil || localPort <= 0 {
+			return errors.New("invalid local port")
+		}
+		targetPort, err := strconv.Atoi(args[3])
+		if err != nil || targetPort <= 0 {
+			return errors.New("invalid target port")
+		}
+		return connectStoredTunnelFlow(args[1], localPort, targetPort)
 	case "ssh":
 		if len(args) < 2 {
 			return errors.New("usage: hubfly ssh <containerIdOrName> [-- <cmd> [args...]]")
