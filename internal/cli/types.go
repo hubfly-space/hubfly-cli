@@ -119,6 +119,20 @@ type createTunnelRequest struct {
 	PrivateKeyPEM string `json:"privateKeyPem"`
 }
 
+type terminalSession struct {
+	SessionID    string `json:"sessionId"`
+	ConnectToken string `json:"connectToken"`
+	ConnectURL   string `json:"connectUrl"`
+	Shell        string `json:"shell"`
+	ExpiresAt    string `json:"expiresAt"`
+}
+
+type execResult struct {
+	ExitCode int    `json:"exitCode"`
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+}
+
 type organization struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
