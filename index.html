@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Hubfly CLI</title>
+        <meta
+            name="description"
+            content="Install, authenticate, deploy, tunnel, inspect, and automate Hubfly from the terminal."
+        />
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script>
+            tailwind.config = {
+                theme: {
+                    extend: {
+                        fontFamily: {
+                            sans: [
+                                "Inter",
+                                "ui-sans-serif",
+                                "system-ui",
+                                "-apple-system",
+                                "BlinkMacSystemFont",
+                                "Segoe UI",
+                                "sans-serif",
+                            ],
+                            mono: [
+                                "JetBrains Mono",
+                                "SFMono-Regular",
+                                "Consolas",
+                                "Liberation Mono",
+                                "monospace",
+                            ],
+                        },
+                        colors: {
+                            ink: "#1f2328",
+                            soil: "#6f5042",
+                            copper: "#a75d3b",
+                            mint: "#1d7d68",
+                            lake: "#236b8e",
+                            paper: "#f7f5f1",
+                            line: "#ded8cf",
+                        },
+                        boxShadow: {
+                            soft: "0 16px 45px rgba(31, 35, 40, 0.11)",
+                        },
+                    },
+                },
+            };
+        </script>
+        <style>
+            html {
+                scroll-behavior: smooth;
+            }
+
+            body {
+                background:
+                    linear-gradient(
+                        rgba(35, 107, 142, 0.08) 1px,
+                        transparent 1px
+                    ),
+                    linear-gradient(
+                        90deg,
+                        rgba(167, 93, 59, 0.08) 1px,
+                        transparent 1px
+                    ),
+                    #f7f5f1;
+                background-size: 28px 28px;
+            }
+
+            .code-scroll {
+                scrollbar-width: thin;
+                scrollbar-color: #b7a99c transparent;
+            }
+
+            .copy-ok {
+                border-color: #1d7d68 !important;
+                color: #1d7d68 !important;
+            }
+        </style>
+    </head>
+    <body class="min-h-screen text-ink antialiased">
+        <header
+            class="sticky top-0 z-40 border-b border-line/80 bg-paper/88 backdrop-blur"
+        >
+            <div
+                class="mx-auto flex max-w-7xl items-center justify-between gap-4 px-5 py-3 lg:px-8"
+            >
+                <a
+                    href="#top"
+                    class="flex items-center gap-3"
+                    aria-label="Hubfly CLI"
+                >
+                    <span
+                        class="grid size-9 place-items-center rounded border border-soil/25 bg-white shadow-sm"
+                    >
+                        <svg
+                            viewBox="0 0 24 24"
+                            class="size-5 text-soil"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            aria-hidden="true"
+                        >
+                            <path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z" />
+                            <path d="M12 12 4.5 7.8" />
+                            <path d="M12 12v8.5" />
+                            <path d="m12 12 7.5-4.2" />
+                        </svg>
+                    </span>
+                    <span class="text-sm font-semibold tracking-wide"
+                        >Hubfly CLI</span
+                    >
+                </a>
+
+                <nav
+                    class="hidden items-center gap-6 text-sm text-ink/70 md:flex"
+                >
+                    <a class="hover:text-ink" href="#install">Install</a>
+                    <a class="hover:text-ink" href="#commands">Commands</a>
+                    <a class="hover:text-ink" href="#deploy">Deploy</a>
+                    <a class="hover:text-ink" href="#automation">Automation</a>
+                    <a class="hover:text-ink" href="#reference">Reference</a>
+                </nav>
+
+                <a
+                    href="https://github.com/hubfly-space/hubfly-cli"
+                    class="inline-flex items-center gap-2 rounded border border-soil/25 bg-white px-3 py-2 text-sm font-medium shadow-sm transition hover:border-soil/50"
+                >
+                    <svg
+                        viewBox="0 0 24 24"
+                        class="size-4"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        aria-hidden="true"
+                    >
+                        <path d="M15 3h6v6" />
+                        <path d="M10 14 21 3" />
+                        <path
+                            d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"
+                        />
+                    </svg>
+                    GitHub
+                </a>
+            </div>
+        </header>
+
+        <main id="top">
+            <section
+                class="mx-auto max-w-7xl px-5 pb-14 pt-10 lg:px-8 lg:pb-20 lg:pt-16"
+            >
+                <div class="grid items-start gap-8 lg:grid-cols-[1fr_0.92fr]">
+                    <div class="max-w-3xl">
+                        <p
+                            class="mb-4 inline-flex rounded border border-mint/25 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-mint"
+                        >
+                            Open-source terminal for Hubfly
+                        </p>
+                        <h1
+                            class="text-4xl font-semibold leading-tight text-ink sm:text-5xl lg:text-6xl"
+                        >
+                            Ship containers, tunnels, shells, and build configs
+                            from one CLI.
+                        </h1>
+                        <p class="mt-5 max-w-2xl text-lg leading-8 text-ink/72">
+                            Hubfly CLI connects your local machine to Hubfly
+                            Dashboard and regional runtime services. Use it for
+                            authenticated project management, local image
+                            deploys, SSH tunnels, command execution, logs, and
+                            build-plan validation.
+                        </p>
+
+                        <div class="mt-8 flex flex-col gap-3 sm:flex-row">
+                            <a
+                                href="#install"
+                                class="inline-flex items-center justify-center rounded bg-soil px-5 py-3 text-sm font-semibold text-white shadow-soft transition hover:bg-[#5e4338]"
+                            >
+                                Install CLI
+                            </a>
+                            <a
+                                href="#commands"
+                                class="inline-flex items-center justify-center rounded border border-soil/25 bg-white px-5 py-3 text-sm font-semibold text-soil shadow-sm transition hover:border-soil/50"
+                            >
+                                View commands
+                            </a>
+                        </div>
+
+                        <div class="mt-8 grid gap-3 sm:grid-cols-3">
+                            <div
+                                class="rounded border border-line bg-white/88 p-4 shadow-sm"
+                            >
+                                <p class="text-2xl font-semibold">Go</p>
+                                <p class="mt-1 text-sm text-ink/65">
+                                    single binary
+                                </p>
+                            </div>
+                            <div
+                                class="rounded border border-line bg-white/88 p-4 shadow-sm"
+                            >
+                                <p class="text-2xl font-semibold">API v1</p>
+                                <p class="mt-1 text-sm text-ink/65">
+                                    dashboard compatible
+                                </p>
+                            </div>
+                            <div
+                                class="rounded border border-line bg-white/88 p-4 shadow-sm"
+                            >
+                                <p class="text-2xl font-semibold">Local</p>
+                                <p class="mt-1 text-sm text-ink/65">
+                                    build and upload
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div
+                        class="rounded border border-ink/15 bg-[#1f2328] shadow-soft"
+                    >
+                        <div
+                            class="flex items-center justify-between border-b border-white/10 px-4 py-3"
+                        >
+                            <div
+                                class="flex items-center gap-2"
+                                aria-hidden="true"
+                            >
+                                <span
+                                    class="size-3 rounded-full bg-[#e06c58]"
+                                ></span>
+                                <span
+                                    class="size-3 rounded-full bg-[#d7a64a]"
+                                ></span>
+                                <span
+                                    class="size-3 rounded-full bg-[#5fb87a]"
+                                ></span>
+                            </div>
+                            <p class="font-mono text-xs text-white/55">
+                                hubfly deploy
+                            </p>
+                        </div>
+                        <div
+                            class="code-scroll overflow-x-auto p-5 font-mono text-sm leading-7"
+                        >
+                            <pre
+                                class="min-w-[34rem] text-white"
+                            ><span class="text-[#8fd4bd]">$</span> hubfly login --token hf_...
+Successfully logged in as Bonheur
+
+<span class="text-[#8fd4bd]">$</span> hubfly deploy --project testing --region eu-1 --yes
+Hubfly Deploy
+Project      testing
+Region       EUROPE
+Container    api
+Build        Dockerfile
+Resources    1 CPU, 1024 MB RAM, 20 GB storage
+Ports        http:80
+
+Deploy build id: build_7c1c...
+Local build
+Image upload
+Waiting for deployment
+Deployment succeeded</pre>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="install" class="border-y border-line bg-white/72">
+                <div
+                    class="mx-auto grid max-w-7xl gap-8 px-5 py-14 lg:grid-cols-[0.8fr_1.2fr] lg:px-8"
+                >
+                    <div>
+                        <p
+                            class="text-sm font-semibold uppercase tracking-[0.18em] text-copper"
+                        >
+                            Install
+                        </p>
+                        <h2 class="mt-3 text-3xl font-semibold">
+                            Get the binary
+                        </h2>
+                        <p class="mt-4 leading-7 text-ink/70">
+                            The installer downloads the latest release for Linux
+                            or macOS and puts the binary on your path. Windows
+                            users can download release assets from GitHub.
+                        </p>
+                    </div>
+
+                    <div class="grid gap-4">
+                        <div
+                            class="rounded border border-line bg-paper p-4 shadow-sm"
+                        >
+                            <div
+                                class="mb-3 flex items-center justify-between gap-3"
+                            >
+                                <p class="text-sm font-semibold">
+                                    Linux / macOS
+                                </p>
+                                <button
+                                    type="button"
+                                    data-copy="curl -fsSL https://raw.githubusercontent.com/hubfly-space/hubfly-cli/main/install.sh | bash"
+                                    class="copy rounded border border-soil/25 px-3 py-1.5 text-xs font-semibold text-soil"
+                                >
+                                    Copy
+                                </button>
+                            </div>
+                            <pre
+                                class="code-scroll overflow-x-auto rounded bg-[#1f2328] p-4 text-sm text-white"
+                            ><code>curl -fsSL https://raw.githubusercontent.com/hubfly-space/hubfly-cli/main/install.sh | bash</code></pre>
+                        </div>
+
+                        <div class="grid gap-4 md:grid-cols-2">
+                            <div
+                                class="rounded border border-line bg-paper p-4"
+                            >
+                                <p class="text-sm font-semibold">Verify</p>
+                                <pre
+                                    class="mt-3 overflow-x-auto rounded bg-white p-3 font-mono text-sm"
+                                ><code>hubfly version</code></pre>
+                            </div>
+                            <div
+                                class="rounded border border-line bg-paper p-4"
+                            >
+                                <p class="text-sm font-semibold">
+                                    Build from source
+                                </p>
+                                <pre
+                                    class="mt-3 overflow-x-auto rounded bg-white p-3 font-mono text-sm"
+                                ><code>git clone https://github.com/hubfly-space/hubfly-cli.git
+cd hubfly-cli
+go build -o hubfly .</code></pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="commands" class="mx-auto max-w-7xl px-5 py-16 lg:px-8">
+                <div
+                    class="mb-8 flex flex-col justify-between gap-4 md:flex-row md:items-end"
+                >
+                    <div>
+                        <p
+                            class="text-sm font-semibold uppercase tracking-[0.18em] text-lake"
+                        >
+                            Command map
+                        </p>
+                        <h2 class="mt-3 text-3xl font-semibold">
+                            Everything the CLI does
+                        </h2>
+                    </div>
+                    <p class="max-w-xl leading-7 text-ink/70">
+                        Commands use the dashboard API by default and can be
+                        pointed at a different API with
+                        <code class="font-mono">HUBFLY_API_URL</code>.
+                    </p>
+                </div>
+
+                <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    <article
+                        class="rounded border border-line bg-white p-5 shadow-sm"
+                    >
+                        <h3 class="font-semibold">Authentication</h3>
+                        <p class="mt-2 text-sm leading-6 text-ink/66">
+                            Store, clear, and verify your Hubfly token.
+                        </p>
+                        <pre
+                            class="mt-4 overflow-x-auto rounded bg-paper p-3 font-mono text-sm"
+                        ><code>hubfly login
+hubfly login --token hf_...
+hubfly logout
+hubfly whoami</code></pre>
+                    </article>
+
+                    <article
+                        class="rounded border border-line bg-white p-5 shadow-sm"
+                    >
+                        <h3 class="font-semibold">Projects TUI</h3>
+                        <p class="mt-2 text-sm leading-6 text-ink/66">
+                            Browse projects, containers, tunnel actions, and
+                            runtime controls.
+                        </p>
+                        <pre
+                            class="mt-4 overflow-x-auto rounded bg-paper p-3 font-mono text-sm"
+                        ><code>hubfly projects
+hubfly projects --org team-slug</code></pre>
+                    </article>
+
+                    <article
+                        class="rounded border border-line bg-white p-5 shadow-sm"
+                    >
+                        <h3 class="font-semibold">Deploy</h3>
+                        <p class="mt-2 text-sm leading-6 text-ink/66">
+                            Build locally, stream the image to a regional
+                            service, and wait for the deployment.
+                        </p>
+                        <pre
+                            class="mt-4 overflow-x-auto rounded bg-paper p-3 font-mono text-sm"
+                        ><code>hubfly deploy
+hubfly deploy advanced
+hubfly deploy --project api --region eu-1 --yes</code></pre>
+                    </article>
+
+                    <article
+                        class="rounded border border-line bg-white p-5 shadow-sm"
+                    >
+                        <h3 class="font-semibold">Build config</h3>
+                        <p class="mt-2 text-sm leading-6 text-ink/66">
+                            Create, validate, edit, or explain
+                            <code class="font-mono">hubfly.build.json</code>.
+                        </p>
+                        <pre
+                            class="mt-4 overflow-x-auto rounded bg-paper p-3 font-mono text-sm"
+                        ><code>hubfly build init
+hubfly build validate --json
+hubfly build edit
+hubfly build explain</code></pre>
+                    </article>
+
+                    <article
+                        class="rounded border border-line bg-white p-5 shadow-sm"
+                    >
+                        <h3 class="font-semibold">Runtime access</h3>
+                        <p class="mt-2 text-sm leading-6 text-ink/66">
+                            Open tunnels, SSH into a container, execute
+                            commands, or stream logs.
+                        </p>
+                        <pre
+                            class="mt-4 overflow-x-auto rounded bg-paper p-3 font-mono text-sm"
+                        ><code>hubfly tunnel api 8080 80
+hubfly ssh api
+hubfly exec api -- printenv
+hubfly logs api --follow</code></pre>
+                    </article>
+
+                    <article
+                        class="rounded border border-line bg-white p-5 shadow-sm"
+                    >
+                        <h3 class="font-semibold">Automation</h3>
+                        <p class="mt-2 text-sm leading-6 text-ink/66">
+                            Run local tunnel control as an HTTP service for
+                            desktop apps or scripts.
+                        </p>
+                        <pre
+                            class="mt-4 overflow-x-auto rounded bg-paper p-3 font-mono text-sm"
+                        ><code>hubfly service
+hubfly service --port 5600
+hubfly update --check
+hubfly update</code></pre>
+                    </article>
+                </div>
+            </section>
+
+            <section id="deploy" class="border-y border-line bg-[#f1f7f4]">
+                <div class="mx-auto max-w-7xl px-5 py-16 lg:px-8">
+                    <div class="grid gap-8 lg:grid-cols-[0.85fr_1.15fr]">
+                        <div>
+                            <p
+                                class="text-sm font-semibold uppercase tracking-[0.18em] text-mint"
+                            >
+                                Deploy pipeline
+                            </p>
+                            <h2 class="mt-3 text-3xl font-semibold">
+                                How a local deploy works
+                            </h2>
+                            <p class="mt-4 leading-7 text-ink/70">
+                                The CLI handles local build work. The dashboard
+                                API creates the session and the regional runtime
+                                receives the compressed image archive. Failed
+                                local builds are reported back through the
+                                authenticated CLI deploy session endpoint.
+                            </p>
+                        </div>
+
+                        <div class="grid gap-3">
+                            <div class="grid gap-3 md:grid-cols-4">
+                                <div
+                                    class="rounded border border-line bg-white p-4"
+                                >
+                                    <p
+                                        class="text-xs font-semibold uppercase tracking-wide text-ink/50"
+                                    >
+                                        Step 1
+                                    </p>
+                                    <p class="mt-2 font-semibold">
+                                        Resolve config
+                                    </p>
+                                    <p class="mt-1 text-sm text-ink/65">
+                                        Load or create build config.
+                                    </p>
+                                </div>
+                                <div
+                                    class="rounded border border-line bg-white p-4"
+                                >
+                                    <p
+                                        class="text-xs font-semibold uppercase tracking-wide text-ink/50"
+                                    >
+                                        Step 2
+                                    </p>
+                                    <p class="mt-2 font-semibold">
+                                        Create session
+                                    </p>
+                                    <p class="mt-1 text-sm text-ink/65">
+                                        Dashboard returns build ID and upload
+                                        token.
+                                    </p>
+                                </div>
+                                <div
+                                    class="rounded border border-line bg-white p-4"
+                                >
+                                    <p
+                                        class="text-xs font-semibold uppercase tracking-wide text-ink/50"
+                                    >
+                                        Step 3
+                                    </p>
+                                    <p class="mt-2 font-semibold">
+                                        Build image
+                                    </p>
+                                    <p class="mt-1 text-sm text-ink/65">
+                                        Docker builds on your machine.
+                                    </p>
+                                </div>
+                                <div
+                                    class="rounded border border-line bg-white p-4"
+                                >
+                                    <p
+                                        class="text-xs font-semibold uppercase tracking-wide text-ink/50"
+                                    >
+                                        Step 4
+                                    </p>
+                                    <p class="mt-2 font-semibold">
+                                        Upload and wait
+                                    </p>
+                                    <p class="mt-1 text-sm text-ink/65">
+                                        Region deploys the uploaded image.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <pre
+                                class="code-scroll overflow-x-auto rounded border border-line bg-[#1f2328] p-5 font-mono text-sm leading-7 text-white"
+                            ><code>hubfly deploy \
+  --project testing \
+  --region eu-1 \
+  --config ./hubfly.build.json \
+  --dockerfile ./Dockerfile \
+  --yes</code></pre>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section
+                id="automation"
+                class="mx-auto max-w-7xl px-5 py-16 lg:px-8"
+            >
+                <div class="grid gap-8 lg:grid-cols-[1fr_1fr]">
+                    <div>
+                        <p
+                            class="text-sm font-semibold uppercase tracking-[0.18em] text-copper"
+                        >
+                            Local automation
+                        </p>
+                        <h2 class="mt-3 text-3xl font-semibold">
+                            Service mode for local tunnel control
+                        </h2>
+                        <p class="mt-4 leading-7 text-ink/70">
+                            Use service mode when another local tool needs to
+                            start, stop, or inspect Hubfly tunnels without
+                            driving the interactive TUI.
+                        </p>
+                    </div>
+
+                    <div
+                        class="rounded border border-line bg-white p-5 shadow-sm"
+                    >
+                        <div class="mb-4 flex items-center justify-between">
+                            <p class="font-semibold">HTTP endpoints</p>
+                            <span
+                                class="rounded border border-mint/25 px-2 py-1 text-xs font-semibold text-mint"
+                            >
+                                local only
+                            </span>
+                        </div>
+                        <div class="grid gap-2 font-mono text-sm">
+                            <p class="rounded bg-paper px-3 py-2">
+                                GET /health
+                            </p>
+                            <p class="rounded bg-paper px-3 py-2">
+                                POST /start
+                            </p>
+                            <p class="rounded bg-paper px-3 py-2">POST /stop</p>
+                            <p class="rounded bg-paper px-3 py-2">
+                                GET /status
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="reference" class="border-t border-line bg-white/78">
+                <div class="mx-auto max-w-7xl px-5 py-16 lg:px-8">
+                    <div class="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
+                        <div class="rounded border border-line bg-paper p-5">
+                            <p class="font-semibold">Environment</p>
+                            <p class="mt-3 font-mono text-sm">HUBFLY_API_URL</p>
+                            <p class="mt-2 text-sm leading-6 text-ink/65">
+                                Overrides the dashboard API host. Default:
+                                <code class="font-mono"
+                                    >https://api.hubfly.space</code
+                                >.
+                            </p>
+                        </div>
+                        <div class="rounded border border-line bg-paper p-5">
+                            <p class="font-semibold">Debugging</p>
+                            <p class="mt-3 font-mono text-sm">--debug</p>
+                            <p class="mt-2 text-sm leading-6 text-ink/65">
+                                Prints API method, URL, masked auth, and
+                                response details.
+                            </p>
+                        </div>
+                        <div class="rounded border border-line bg-paper p-5">
+                            <p class="font-semibold">Storage</p>
+                            <p class="mt-3 font-mono text-sm">~/.hubfly</p>
+                            <p class="mt-2 text-sm leading-6 text-ink/65">
+                                Token config, managed SSH keys, known hosts, and
+                                debug logs.
+                            </p>
+                        </div>
+                        <div class="rounded border border-line bg-paper p-5">
+                            <p class="font-semibold">Updates</p>
+                            <p class="mt-3 font-mono text-sm">hubfly update</p>
+                            <p class="mt-2 text-sm leading-6 text-ink/65">
+                                Checks GitHub releases and replaces the local
+                                binary.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="border-t border-line bg-paper">
+            <div
+                class="mx-auto flex max-w-7xl flex-col justify-between gap-3 px-5 py-8 text-sm text-ink/62 md:flex-row lg:px-8"
+            >
+                <p>Hubfly CLI documentation page for GitHub Pages.</p>
+                <div class="flex gap-4">
+                    <a class="hover:text-ink" href="#install">Install</a>
+                    <a class="hover:text-ink" href="#commands">Commands</a>
+                    <a
+                        class="hover:text-ink"
+                        href="https://github.com/hubfly-space/hubfly-cli"
+                        >Repository</a
+                    >
+                </div>
+            </div>
+        </footer>
+
+        <script>
+            for (const button of document.querySelectorAll("[data-copy]")) {
+                button.addEventListener("click", async () => {
+                    const text = button.getAttribute("data-copy") || "";
+                    await navigator.clipboard.writeText(text);
+                    const original = button.textContent;
+                    button.textContent = "Copied";
+                    button.classList.add("copy-ok");
+                    window.setTimeout(() => {
+                        button.textContent = original;
+                        button.classList.remove("copy-ok");
+                    }, 1200);
+                });
+            }
+        </script>
+    </body>
+</html>

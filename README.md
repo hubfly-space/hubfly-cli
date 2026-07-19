@@ -23,12 +23,14 @@ hubfly version
 - Token-based auth (`login`, `logout`, `whoami`)
 - Persistent Bubble Tea TUI for project/container/tunnel workflow (`projects`)
 - Single and multiple tunnel connect flows
+- SSH, exec, and log streaming for containers
 - Local tunnel status screens while sessions are active
 - Local `hubfly deploy` flow with reusable `hubfly-builder`, `hubfly.build.json`, deploy diffs, and resumable image uploads
 - Build config helpers: `hubfly build init|validate|edit|explain`
 - Debug mode for API requests/responses (`--debug` or `HUBFLY_DEBUG=1`)
 - Built-in version and self-update commands
 - Tunnel service mode (`service`)
+- GitHub Pages documentation page in `index.html`
 
 ## Commands
 
@@ -44,11 +46,37 @@ hubfly build validate [--config <path>] [--dockerfile <path>] [--builder-version
 hubfly build edit [--config <path>]
 hubfly build explain [--config <path>] [--dockerfile <path>] [--builder-version <tag>] [--json]
 hubfly tunnel <containerIdOrName> <localPort> <targetPort>
+hubfly ssh <containerIdOrName>
+hubfly exec <containerIdOrName> -- <cmd> [args...]
+hubfly logs <containerIdOrName> [--follow|-f]
+hubfly orgs
 hubfly version
 hubfly update --check
 hubfly update
 hubfly service [--port <port>]
 ```
+
+## API compatibility
+
+By default the CLI talks to:
+
+```bash
+https://api.hubfly.space
+```
+
+Override it for local or staging environments:
+
+```bash
+HUBFLY_API_URL=http://127.0.0.1:3000 hubfly whoami
+```
+
+API errors include the backend trace ID when the dashboard returns one, for example:
+
+```text
+Authentication required (status 401, trace err_...)
+```
+
+Use that trace ID to find the matching backend log.
 
 ## TUI Controls (`hubfly projects`)
 
@@ -84,6 +112,7 @@ Multi-tunnel selection:
 - runs builder inspection for auto-detected stacks
 - builds the Docker image locally on your machine
 - uploads a compressed image archive to the regional builder with retryable chunk uploads
+- reports local build/upload failures back to the authenticated CLI deploy session endpoint
 - waits for the deploy by default, or returns early with `--detach`
 
 Common examples:
@@ -116,6 +145,14 @@ Before deploy, the CLI shows a diff for:
 - healthcheck
 - bound-container replacement behavior
 
+Non-interactive deploys should provide enough information up front:
+
+```bash
+hubfly deploy --project my-api --region eu-1 --config ./hubfly.build.json --yes
+```
+
+Use `--detach` when a script only needs to upload the image and let Hubfly finish deployment in the background.
+
 ## Build Config Tooling
 
 `hubfly deploy` does not require any manual setup, but the build helpers are useful when you want to inspect or adjust the config explicitly.
@@ -133,6 +170,15 @@ What they do:
 - `hubfly build validate`: resolve the effective build plan and verify Dockerfile/builder inputs
 - `hubfly build edit`: open `hubfly.build.json` in `$EDITOR`
 - `hubfly build explain`: show what `hubfly-builder` detected and why
+
+Useful JSON output:
+
+```bash
+hubfly build validate --json
+hubfly build explain --json
+```
+
+Those commands are meant for CI and for comparing the local build plan against what the dashboard will deploy.
 
 ## Debug and logs
 
@@ -154,6 +200,21 @@ Debug output includes:
 - masked Authorization token
 - request/response payloads
 - tunnel route selection details
+- backend error/request trace IDs when the API returns them
+
+Runtime logs:
+
+```bash
+hubfly logs <containerIdOrName>
+hubfly logs <containerIdOrName> --follow
+```
+
+Remote command execution:
+
+```bash
+hubfly exec <containerIdOrName> -- printenv
+hubfly exec <containerIdOrName> -- sh -lc "ls -la /app"
+```
 
 ## SSH tunnel behavior
 
@@ -178,6 +239,18 @@ Endpoints:
 - `POST /start`
 - `POST /stop`
 - `GET /status`
+
+This is useful when a desktop app, editor extension, or local automation needs to manage Hubfly tunnels without controlling the interactive TUI.
+
+## GitHub Pages docs
+
+This repository includes a standalone docs page:
+
+```text
+index.html
+```
+
+It uses Tailwind through the CDN and can be shipped directly with GitHub Pages from the repository root.
 
 ## Build from source
 
