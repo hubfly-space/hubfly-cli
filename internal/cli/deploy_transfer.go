@@ -28,23 +28,24 @@ func (r *progressReadCloser) Close() error {
 
 type uploadProgress struct {
 	label      string
-	totalBytes int64
 	writer     io.Writer
 	startedAt  time.Time
 	tty        bool
 	bytes      atomic.Int64
+	totalBytes atomic.Int64
 	done       chan struct{}
 }
 
 func newUploadProgress(label string, totalBytes int64) *uploadProgress {
-	return &uploadProgress{
+	progress := &uploadProgress{
 		label:      label,
-		totalBytes: totalBytes,
 		writer:     os.Stdout,
 		startedAt:  time.Now(),
 		tty:        canUseTUI(),
 		done:       make(chan struct{}),
 	}
+	progress.totalBytes.Store(totalBytes)
+	return progress
 }
 
 func (p *uploadProgress) Wrap(reader io.ReadCloser) io.ReadCloser {
@@ -53,6 +54,10 @@ func (p *uploadProgress) Wrap(reader io.ReadCloser) io.ReadCloser {
 
 func (p *uploadProgress) SetCurrent(value int64) {
 	p.bytes.Store(value)
+}
+
+func (p *uploadProgress) SetTotal(value int64) {
+	p.totalBytes.Store(value)
 }
 
 func (p *uploadProgress) Start() {
@@ -83,7 +88,7 @@ func (p *uploadProgress) Finish() {
 
 func (p *uploadProgress) render(final bool) {
 	current := p.bytes.Load()
-	total := p.totalBytes
+	total := p.totalBytes.Load()
 	if current > total {
 		total = current
 	}

@@ -71,10 +71,16 @@ func run(args []string) error {
 		}
 		return tunnelFlow(args[1], localPort, targetPort)
 	case "ssh":
-		if len(args) != 2 {
-			return errors.New("usage: hubfly ssh <containerIdOrName>")
+		if len(args) < 2 {
+			return errors.New("usage: hubfly ssh <containerIdOrName> [-- <cmd> [args...]]")
 		}
-		return sshFlow(args[1])
+		if len(args) == 2 {
+			return sshFlow(args[1])
+		}
+		if len(args) >= 4 && args[2] == "--" {
+			return execFlow(args[1], args[3:], 55*time.Second)
+		}
+		return errors.New("usage: hubfly ssh <containerIdOrName> [-- <cmd> [args...]]")
 	case "exec":
 		if len(args) < 2 {
 			return errors.New("usage: hubfly exec <containerIdOrName> -- <cmd> [args...]")
@@ -129,7 +135,7 @@ func printUsage() {
 	fmt.Println("       [--config <path>] [--detach] [--dockerfile <path>] [--builder-version <tag>]")
 	fmt.Println("  hubfly [--debug] build <init|validate|edit|explain>")
 	fmt.Println("  hubfly [--debug] tunnel <containerIdOrName> <localPort> <targetPort>")
-	fmt.Println("  hubfly [--debug] ssh <containerIdOrName>")
+	fmt.Println("  hubfly [--debug] ssh <containerIdOrName> [-- <cmd> [args...]]")
 	fmt.Println("  hubfly [--debug] exec <containerIdOrName> -- <cmd> [args...]")
 	fmt.Println("  hubfly [--debug] version")
 	fmt.Println("  hubfly [--debug] update [--check]")

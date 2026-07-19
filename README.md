@@ -23,7 +23,7 @@ hubfly version
 - Token-based auth (`login`, `logout`, `whoami`)
 - Persistent Bubble Tea TUI for project/container/tunnel workflow (`projects`)
 - Single and multiple tunnel connect flows
-- SSH, exec, and log streaming for containers
+- SSH, one-shot command exec, and log streaming for containers
 - Local tunnel status screens while sessions are active
 - Local `hubfly deploy` flow with reusable `hubfly-builder`, `hubfly.build.json`, deploy diffs, and resumable image uploads
 - Build config helpers: `hubfly build init|validate|edit|explain`
@@ -46,7 +46,7 @@ hubfly build validate [--config <path>] [--dockerfile <path>] [--builder-version
 hubfly build edit [--config <path>]
 hubfly build explain [--config <path>] [--dockerfile <path>] [--builder-version <tag>] [--json]
 hubfly tunnel <containerIdOrName> <localPort> <targetPort>
-hubfly ssh <containerIdOrName>
+hubfly ssh <containerIdOrName> [-- <cmd> [args...]]
 hubfly exec <containerIdOrName> -- <cmd> [args...]
 hubfly logs <containerIdOrName> [--follow|-f]
 hubfly orgs
@@ -212,6 +212,8 @@ hubfly logs <containerIdOrName> --follow
 Remote command execution:
 
 ```bash
+hubfly ssh <containerIdOrName>
+hubfly ssh <containerIdOrName> -- ls -la /app
 hubfly exec <containerIdOrName> -- printenv
 hubfly exec <containerIdOrName> -- sh -lc "ls -la /app"
 ```

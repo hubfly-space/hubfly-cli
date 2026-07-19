@@ -110,7 +110,7 @@ func reportDeployFailure(token, buildID, uploadToken, errorMessage string) error
 func createTerminalSession(token, projectID, containerID string) (terminalSession, error) {
 	var payload terminalSession
 	url := apiHost + "/api/v1/projects/" + projectID + "/containers/" + containerID + "/terminal/session"
-	err := doJSONRequest(http.MethodPost, url, token, nil, &payload)
+	err := doJSONRequest(http.MethodPost, url, token, map[string]any{}, &payload)
 	return payload, err
 }
 

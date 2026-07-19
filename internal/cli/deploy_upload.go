@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/daemon"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
@@ -50,14 +51,31 @@ func uploadLocalImage(localTag string, session deploySessionResponse) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
+	progress := newUploadProgress("Upload progress", 0)
+	updates := make(chan v1.Update, 32)
+	progress.Start()
+	defer progress.Finish()
+	go func() {
+		for update := range updates {
+			if update.Total > 0 {
+				progress.SetTotal(update.Total)
+			}
+			if update.Complete >= 0 {
+				progress.SetCurrent(update.Complete)
+			}
+		}
+	}()
+
 	writeOptions := []remote.Option{
 		remote.WithContext(ctx),
 		remote.WithAuth(&authn.Bearer{Token: session.Upload.Token}),
+		remote.WithProgress(updates),
 	}
 	if strings.EqualFold(session.Upload.RegistryScheme, "http") {
 		writeOptions = append(writeOptions, remote.WithTransport(http.DefaultTransport))
 	}
-	if err := remote.Write(targetRef, img, writeOptions...); err != nil {
+	err = remote.Write(targetRef, img, writeOptions...)
+	if err != nil {
 		return fmt.Errorf("push image to regional registry: %w", err)
 	}
 
