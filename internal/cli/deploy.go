@@ -1024,7 +1024,15 @@ func estimateLocalImageSize(localTag string) int64 {
 
 func waitForDeploySession(token, buildID string) (deploySessionStatusResponse, error) {
 	deadline := time.Now().Add(20 * time.Minute)
+	const (
+		pollInterval       = 3 * time.Second
+		heartbeatInterval  = 15 * time.Second
+		stalledDeployLimit = 10 * time.Minute
+	)
 	lastStatus := ""
+	lastServerUpdate := time.Time{}
+	lastProgress := time.Now()
+	lastHeartbeat := time.Time{}
 
 	for {
 		status, err := fetchDeploySession(token, buildID)
@@ -1034,6 +1042,29 @@ func waitForDeploySession(token, buildID string) (deploySessionStatusResponse, e
 		if status.Build.Status != lastStatus {
 			lastStatus = status.Build.Status
 			fmt.Printf("Deploy status: %s\n", lastStatus)
+			lastProgress = time.Now()
+		}
+
+		if parsed, parseErr := time.Parse(time.RFC3339Nano, status.Build.UpdatedAt); parseErr == nil {
+			if parsed.After(lastServerUpdate) {
+				lastServerUpdate = parsed
+				lastProgress = time.Now()
+			}
+		}
+
+		now := time.Now()
+		if lastHeartbeat.IsZero() || now.Sub(lastHeartbeat) >= heartbeatInterval {
+			lastHeartbeat = now
+			serverUpdate := "unknown"
+			if !lastServerUpdate.IsZero() {
+				serverUpdate = lastServerUpdate.Local().Format(time.RFC3339)
+			}
+			fmt.Printf(
+				"Deploy still in progress: status=%s, no-progress=%s, last server update=%s\n",
+				status.Build.Status,
+				now.Sub(lastProgress).Round(time.Second),
+				serverUpdate,
+			)
 		}
 
 		switch status.Build.Status {
@@ -1041,10 +1072,17 @@ func waitForDeploySession(token, buildID string) (deploySessionStatusResponse, e
 			return status, nil
 		}
 
-		if time.Now().After(deadline) {
+		if now.After(deadline) {
 			return deploySessionStatusResponse{}, fmt.Errorf("timed out waiting for deployment")
 		}
-		time.Sleep(3 * time.Second)
+		if now.Sub(lastProgress) >= stalledDeployLimit {
+			return deploySessionStatusResponse{}, fmt.Errorf(
+				"deployment made no progress for %s (last status: %s)",
+				stalledDeployLimit,
+				status.Build.Status,
+			)
+		}
+		time.Sleep(pollInterval)
 	}
 }
 
