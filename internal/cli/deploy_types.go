@@ -44,6 +44,7 @@ type deployRuntime struct {
 }
 
 type deployPort struct {
+	ID        string `json:"id,omitempty"`
 	Container int    `json:"container"`
 	Protocol  string `json:"protocol"`
 	Host      int    `json:"host,omitempty"`
@@ -79,6 +80,13 @@ type deployEnvVar struct {
 	Value  string `json:"value"`
 	Secret bool   `json:"secret,omitempty"`
 	Scope  string `json:"scope,omitempty"`
+	From   string `json:"from,omitempty"`
+}
+
+type deployRemoveSet struct {
+	EnvironmentKeys []string `json:"environmentKeys,omitempty"`
+	PortIDs         []string `json:"portIds,omitempty"`
+	VolumeIDs       []string `json:"volumeIds,omitempty"`
 }
 
 type deployConfigFile struct {
@@ -99,7 +107,8 @@ type deployConfigFile struct {
 		RestartPolicy       *deployRestartPolicy `json:"restartPolicy,omitempty"`
 		Labels              map[string]string    `json:"labels,omitempty"`
 	} `json:"deploy"`
-	Env      []deployEnvVar `json:"env,omitempty"`
+	Env      []deployEnvVar  `json:"env,omitempty"`
+	Remove   deployRemoveSet `json:"remove,omitempty"`
 	Metadata struct {
 		BuilderVersion   string `json:"builderVersion,omitempty"`
 		LastBuildID      string `json:"lastBuildId,omitempty"`
@@ -107,6 +116,7 @@ type deployConfigFile struct {
 		LastImageDisplay string `json:"lastImageDisplay,omitempty"`
 		LastDeployedAt   string `json:"lastDeployedAt,omitempty"`
 	} `json:"metadata,omitempty"`
+	Specified map[string]bool `json:"-"`
 }
 
 type builderInspectBuildConfig struct {
@@ -151,6 +161,9 @@ type cliDeploymentConfig struct {
 	Networking           cliDeploymentNetworking     `json:"networking"`
 	EnvironmentVariables []cliDeploymentEnvVar       `json:"environmentVariables,omitempty"`
 	Source               cliDeploymentSource         `json:"source"`
+	Remove               deployRemoveSet             `json:"remove,omitempty"`
+	ManagedFields        []string                    `json:"managedFields,omitempty"`
+	ManifestVersion      int                         `json:"manifestVersion"`
 }
 
 type cliDeploymentSource struct {
@@ -202,6 +215,7 @@ type cliDeploymentNetworking struct {
 }
 
 type cliDeploymentPort struct {
+	ID        string `json:"id,omitempty"`
 	Container int    `json:"container"`
 	Protocol  string `json:"protocol"`
 	Host      int    `json:"host,omitempty"`
@@ -217,9 +231,63 @@ type cliDeploymentEnvVar struct {
 }
 
 type createDeploySessionRequest struct {
-	BuilderVersion   string              `json:"builderVersion,omitempty"`
-	BoundContainerID string              `json:"boundContainerId,omitempty"`
-	Config           cliDeploymentConfig `json:"config"`
+	PlanID               string              `json:"planId,omitempty"`
+	PlanHash             string              `json:"planHash,omitempty"`
+	BaseCloudRevision    string              `json:"baseCloudRevision,omitempty"`
+	ClientIdempotencyKey string              `json:"clientIdempotencyKey,omitempty"`
+	BuilderVersion       string              `json:"builderVersion,omitempty"`
+	BoundContainerID     string              `json:"boundContainerId,omitempty"`
+	ApplyMode            string              `json:"applyMode,omitempty"`
+	Config               cliDeploymentConfig `json:"config"`
+}
+
+type createDeployPlanRequest struct {
+	ProjectID         string              `json:"projectId"`
+	ContainerID       string              `json:"containerId,omitempty"`
+	ClientVersion     string              `json:"clientVersion"`
+	Mode              string              `json:"mode"`
+	BaseCloudRevision string              `json:"baseCloudRevision,omitempty"`
+	DesiredState      cliDeploymentConfig `json:"desiredState"`
+}
+
+type deployPlanOperation struct {
+	Path        string `json:"path"`
+	Action      string `json:"action"`
+	Origin      string `json:"origin"`
+	Destructive bool   `json:"destructive,omitempty"`
+	Message     string `json:"message,omitempty"`
+}
+
+type deployPlanResponse struct {
+	PlanID                string                `json:"planId"`
+	PlanHash              string                `json:"planHash"`
+	ExpiresAt             string                `json:"expiresAt"`
+	CurrentRevision       string                `json:"currentRevision"`
+	Operations            []deployPlanOperation `json:"operations"`
+	DestructiveOperations []deployPlanOperation `json:"destructiveOperations"`
+	Warnings              []string              `json:"warnings"`
+}
+
+type activeDeploySessionResponse struct {
+	Session *struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		Phase     string `json:"phase"`
+		PlanID    string `json:"planId"`
+		PlanHash  string `json:"planHash"`
+		UpdatedAt string `json:"updatedAt"`
+	} `json:"session"`
+}
+
+type deploySessionEventsResponse struct {
+	Events []struct {
+		Phase     string            `json:"phase"`
+		Status    string            `json:"status"`
+		Message   string            `json:"message"`
+		ErrorCode string            `json:"errorCode,omitempty"`
+		Detail    map[string]string `json:"detail,omitempty"`
+		CreatedAt string            `json:"createdAt"`
+	} `json:"events"`
 }
 
 type deploySessionResponse struct {
@@ -261,12 +329,15 @@ type deploySessionStatusResponse struct {
 		RegionName       string `json:"regionName"`
 		BoundContainerID string `json:"boundContainerId"`
 		BuilderVersion   string `json:"builderVersion"`
+		Phase            string `json:"phase"`
+		ErrorCode        string `json:"errorCode"`
 	} `json:"build"`
 }
 
 type deployContainerSnapshotResponse struct {
 	Container struct {
 		ID                 string                 `json:"id"`
+		Revision           string                 `json:"revision"`
 		Name               string                 `json:"name"`
 		ProjectID          string                 `json:"projectId"`
 		ProjectName        string                 `json:"projectName"`
