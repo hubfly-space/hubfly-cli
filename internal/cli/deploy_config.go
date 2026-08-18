@@ -88,6 +88,22 @@ func loadOrInitDeployConfigAt(projectDir, path string) (deployConfigFile, bool, 
 	if err := json.Unmarshal(content, &cfg); err != nil {
 		return deployConfigFile{}, false, err
 	}
+	var presence struct {
+		Deploy map[string]json.RawMessage `json:"deploy"`
+		Env    json.RawMessage            `json:"env"`
+	}
+	if err := json.Unmarshal(content, &presence); err == nil {
+		cfg.Specified = make(map[string]bool)
+		for key, rawValue := range presence.Deploy {
+			if key == "process" && strings.TrimSpace(string(rawValue)) == "{}" {
+				continue
+			}
+			cfg.Specified["deploy."+key] = true
+		}
+		if presence.Env != nil {
+			cfg.Specified["env"] = true
+		}
+	}
 	normalizeDeployConfig(&cfg, projectDir)
 	return cfg, false, nil
 }
@@ -112,7 +128,8 @@ func defaultDeployConfig(projectDir string) deployConfigFile {
 	}
 
 	var cfg deployConfigFile
-	cfg.Version = 1
+	cfg.Specified = map[string]bool{"deploy.tier": true, "deploy.resources": true, "deploy.runtime": true}
+	cfg.Version = 2
 	cfg.Project.Name = base
 	cfg.Container.Name = containerName
 	cfg.Build.Mode = "auto"
@@ -294,7 +311,7 @@ func applyInspectOutput(cfg *deployConfigFile, inspect builderInspectOutput) {
 			cfg.Deploy.Ports = []deployPort{
 				{
 					Container: port,
-					Protocol:  "TCP",
+					Protocol:  "HTTP",
 				},
 			}
 		}
