@@ -9,9 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"hubfly-cli/internal/version"
 )
 
 const (
@@ -41,17 +44,25 @@ func deployFlowWithOptions(opts deployOptions) error {
 		return err
 	}
 
-	printDeployHeader(projectDir)
-
 	cfg, created, err := loadOrInitDeployConfigAt(projectDir, cfgPath)
 	if err != nil {
 		return err
+	}
+	if cfg.Version < 2 {
+		return fmt.Errorf("hubfly.build.json schema version %d requires explicit migration; run `hubfly config migrate --config %s`", cfg.Version, cfgPath)
+	}
+	quietJSONPlan := opts.PlanOnly && opts.JSON
+	if !quietJSONPlan {
+		printDeployHeader(projectDir)
+	}
+	if opts.PullOnly {
+		return deployPullCloudConfig(token, projectDir, cfgPath, cfg, opts)
 	}
 	normalizeDeployConfig(&cfg, projectDir)
 	applyDeployOverrides(&cfg, opts)
 
 	editConfig := opts.Advanced
-	if !opts.Advanced && !opts.AutoApprove && isInteractiveShell() {
+	if !quietJSONPlan && !opts.Advanced && !opts.AutoApprove && isInteractiveShell() {
 		editConfig, err = promptDeployReviewChoice(created)
 		if err != nil {
 			return err
@@ -86,22 +97,102 @@ func deployFlowWithOptions(opts deployOptions) error {
 	if err != nil {
 		return err
 	}
+	if opts.Mode == "smart" {
+		applySmartCloudDefaults(&cfg, current)
+	}
+	if current != nil && !opts.PlanOnly {
+		active, activeErr := fetchActiveDeploySession(token, current.Container.ID)
+		if activeErr != nil {
+			return fmt.Errorf("check active deployment: %w", activeErr)
+		}
+		if active.Session != nil {
+			if !opts.ForceNew {
+				fmt.Printf("Deployment %s is already active (%s/%s). Attaching to it.\n", active.Session.ID, active.Session.Status, active.Session.Phase)
+				_, waitErr := waitForDeploySession(token, active.Session.ID)
+				return waitErr
+			}
+			if !opts.AutoApprove {
+				if !isInteractiveShell() {
+					return fmt.Errorf("--force-new requires --yes in non-interactive mode")
+				}
+				confirmed, promptErr := promptYesNo("Cancel the active deployment and start a new rollout", false)
+				if promptErr != nil {
+					return promptErr
+				}
+				if !confirmed {
+					return fmt.Errorf("deployment cancelled")
+				}
+			}
+			if cancelErr := cancelDeploySession(token, active.Session.ID); cancelErr != nil {
+				return fmt.Errorf("cancel active deployment: %w", cancelErr)
+			}
+		}
+	}
 
-	printDeploySummary(projectDir, cfg, prepared)
-	printDeployWarnings("Builder warnings", prepared.Warnings)
+	if !quietJSONPlan {
+		printDeploySummary(projectDir, cfg, prepared)
+		printDeployWarnings("Builder warnings", prepared.Warnings)
+	}
 	diffPlan := buildDeployDiffPlan(projectDir, cfg, prepared, current)
-	printDeployDiffPlan(diffPlan)
-	if err := confirmDeployPlan(opts, diffPlan); err != nil {
-		return err
+	if !quietJSONPlan {
+		printDeployDiffPlan(diffPlan)
 	}
 
 	deploymentConfig := buildDeploymentConfig(cfg)
+	cloudRevision := ""
+	if current != nil {
+		cloudRevision = current.Container.Revision
+	}
+	serverPlan, err := createDeployPlan(token, createDeployPlanRequest{
+		ProjectID:         cfg.Project.ID,
+		ContainerID:       strings.TrimSpace(cfg.Container.ID),
+		ClientVersion:     version.Version,
+		Mode:              opts.Mode,
+		BaseCloudRevision: cloudRevision,
+		DesiredState:      deploymentConfig,
+	})
+	if err != nil {
+		return fmt.Errorf("create server deployment plan: %w", err)
+	}
+	if opts.PlanOnly && opts.JSON {
+		return json.NewEncoder(os.Stdout).Encode(serverPlan)
+	}
+	printServerDeployPlan(serverPlan)
+	if opts.PlanOnly {
+		return nil
+	}
+	if len(serverPlan.DestructiveOperations) > 0 {
+		diffPlan.HasDestructive = true
+	}
+	if err := confirmDeployPlan(opts, diffPlan); err != nil {
+		return err
+	}
 	session, err := createDeploySessionWithMissingBoundFallback(token, cfgPath, &cfg, createDeploySessionRequest{
-		BuilderVersion:   prepared.BuilderVersion,
-		BoundContainerID: strings.TrimSpace(cfg.Container.ID),
-		Config:           deploymentConfig,
+		PlanID:               serverPlan.PlanID,
+		PlanHash:             serverPlan.PlanHash,
+		BaseCloudRevision:    serverPlan.CurrentRevision,
+		ClientIdempotencyKey: "cli-session:" + serverPlan.PlanHash,
+		BuilderVersion:       prepared.BuilderVersion,
+		BoundContainerID:     strings.TrimSpace(cfg.Container.ID),
+		ApplyMode:            opts.Mode,
+		Config:               deploymentConfig,
 	}, opts)
 	if err != nil {
+		// Another CLI process may have acquired the container lease after the
+		// preflight active-session check above. Treat that race exactly like an
+		// active session discovered during preflight: attach to the winner
+		// instead of making the losing process fail with a raw 409.
+		if current != nil && !opts.ForceNew && isActiveDeploymentConflict(err) {
+			active, activeErr := fetchActiveDeploySession(token, current.Container.ID)
+			if activeErr == nil && active.Session != nil {
+				fmt.Printf("Deployment %s became active while this deploy was starting (%s/%s). Attaching to it.\n", active.Session.ID, active.Session.Status, active.Session.Phase)
+				if opts.Detach {
+					return nil
+				}
+				_, waitErr := waitForDeploySession(token, active.Session.ID)
+				return waitErr
+			}
+		}
 		return err
 	}
 
@@ -128,7 +219,8 @@ func deployFlowWithOptions(opts deployOptions) error {
 		"Image upload",
 		fmt.Sprintf("Streaming image to %s (%s)", session.Region.Name, session.Region.PrimaryIP),
 	)
-	if err := uploadLocalImage(localTag, session); err != nil {
+	imageDigest, err := uploadLocalImage(localTag, session)
+	if err != nil {
 		_ = reportDeployFailure(
 			token,
 			session.BuildID,
@@ -136,6 +228,9 @@ func deployFlowWithOptions(opts deployOptions) error {
 			"Image upload failed: "+err.Error(),
 		)
 		return err
+	}
+	if err := completeDeployUpload(token, session, imageDigest); err != nil {
+		return fmt.Errorf("finalize uploaded image: %w", err)
 	}
 
 	cfg.Metadata.BuilderVersion = prepared.BuilderVersion
@@ -183,6 +278,161 @@ func deployFlowWithOptions(opts deployOptions) error {
 	fmt.Printf("Image:     %s\n", displayDeployValue(status.Build.ImageDisplay, "Managed by Hubfly"))
 	fmt.Printf("Config:    %s\n", cfgPath)
 	return nil
+}
+
+func deployPullCloudConfig(token, projectDir, cfgPath string, cfg deployConfigFile, opts deployOptions) error {
+	if strings.TrimSpace(cfg.Container.ID) == "" {
+		return fmt.Errorf("deploy pull requires a bound container ID")
+	}
+	snapshot, err := fetchDeployContainerSnapshot(token, cfg.Container.ID)
+	if err != nil {
+		return err
+	}
+	updated := cfg
+	updated.Container.Name = snapshot.Container.Name
+	updated.Project.ID = snapshot.Container.ProjectID
+	updated.Project.Name = snapshot.Container.ProjectName
+	updated.Deploy.Resources = deployResources{CPU: snapshot.Container.Resources.CPU, RAM: snapshot.Container.Resources.RAM, Storage: snapshot.Container.Resources.Storage}
+	updated.Deploy.Runtime = deployRuntime{AutoSleep: snapshot.Container.Runtime.AutoSleep, AutoScale: snapshot.Container.Runtime.AutoScale, Is24x7: snapshot.Container.Runtime.Is24x7, AutoScaleMode: snapshot.Container.Runtime.AutoScaleMode}
+	updated.Deploy.Ports = make([]deployPort, 0, len(snapshot.Container.Ports))
+	for _, port := range snapshot.Container.Ports {
+		updated.Deploy.Ports = append(updated.Deploy.Ports, deployPort{ID: port.ID, Container: port.Container, Protocol: normalizePortProtocol(port.Protocol)})
+	}
+	updated.Deploy.Volumes = make([]deployVolume, 0, len(snapshot.Container.Volumes))
+	for _, volume := range snapshot.Container.Volumes {
+		updated.Deploy.Volumes = append(updated.Deploy.Volumes, deployVolume{Name: volume.ID, MountPath: volume.MountPoint})
+	}
+	updated.Deploy.Process = deployProcess{Command: cloneStrings(snapshot.Container.Process.Command), Entrypoint: cloneStrings(snapshot.Container.Process.Entrypoint), WorkingDir: snapshot.Container.Process.WorkingDir}
+	if snapshot.Container.Healthcheck != nil {
+		updated.Deploy.Healthcheck = &deployHealthcheck{Test: cloneStrings(snapshot.Container.Healthcheck.Test), Interval: snapshot.Container.Healthcheck.Interval, Timeout: snapshot.Container.Healthcheck.Timeout, StartPeriod: snapshot.Container.Healthcheck.StartPeriod, Retries: snapshot.Container.Healthcheck.Retries}
+	} else {
+		updated.Deploy.Healthcheck = nil
+	}
+	updated.Deploy.RestartPolicy = &deployRestartPolicy{Name: snapshot.Container.RestartPolicy}
+	updated.Deploy.Labels = snapshot.Container.Labels
+	localEnv := make(map[string]deployEnvVar, len(cfg.Env))
+	for _, item := range cfg.Env {
+		localEnv[item.Name] = item
+	}
+	updated.Env = make([]deployEnvVar, 0, len(snapshot.Container.Environment))
+	for _, cloud := range snapshot.Container.Environment {
+		item, exists := localEnv[cloud.Key]
+		if !exists || cloud.IsSecret {
+			item = deployEnvVar{Name: cloud.Key, Secret: cloud.IsSecret, Scope: "both", From: "cloud"}
+		}
+		if cloud.IsSecret {
+			item.Value = ""
+			item.From = "cloud"
+		}
+		updated.Env = append(updated.Env, item)
+	}
+	oldPayload, _ := json.MarshalIndent(cfg, "", "  ")
+	newPayload, _ := json.MarshalIndent(updated, "", "  ")
+	fmt.Printf("Cloud adoption diff for %s:\n", cfgPath)
+	fmt.Printf("  ports: %d -> %d\n  volumes: %d -> %d\n  environment keys: %d -> %d\n", len(cfg.Deploy.Ports), len(updated.Deploy.Ports), len(cfg.Deploy.Volumes), len(updated.Deploy.Volumes), len(cfg.Env), len(updated.Env))
+	if string(oldPayload) == string(newPayload) {
+		fmt.Println("No configuration changes.")
+		return nil
+	}
+	if configHasUncommittedChanges(projectDir, cfgPath) && !opts.AutoApprove {
+		if !isInteractiveShell() {
+			return fmt.Errorf("refusing to overwrite an uncommitted manifest without --yes")
+		}
+		confirmed, promptErr := promptYesNo("Manifest has uncommitted changes. Create a backup and adopt cloud configuration", false)
+		if promptErr != nil {
+			return promptErr
+		}
+		if !confirmed {
+			return fmt.Errorf("cloud adoption declined")
+		}
+	}
+	backup := fmt.Sprintf("%s.%s.bak", cfgPath, time.Now().UTC().Format("20060102T150405Z"))
+	if err := os.WriteFile(backup, append(oldPayload, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := saveDeployConfig(cfgPath, updated); err != nil {
+		return err
+	}
+	fmt.Printf("Updated %s\nBackup: %s\n", cfgPath, backup)
+	return nil
+}
+
+func configHasUncommittedChanges(projectDir, cfgPath string) bool {
+	relative, err := filepath.Rel(projectDir, cfgPath)
+	if err != nil {
+		return false
+	}
+	command := exec.Command("git", "diff", "--quiet", "--", relative)
+	command.Dir = projectDir
+	if err := command.Run(); err != nil {
+		return true
+	}
+	command = exec.Command("git", "diff", "--cached", "--quiet", "--", relative)
+	command.Dir = projectDir
+	return command.Run() != nil
+}
+
+func printServerDeployPlan(plan deployPlanResponse) {
+	fmt.Printf("\nServer plan %s (cloud revision %s)\n", plan.PlanID, plan.CurrentRevision)
+	for _, operation := range plan.Operations {
+		if operation.Action == "preserve" && operation.Origin == "cloud" {
+			continue
+		}
+		marker := " "
+		if operation.Destructive {
+			marker = "!"
+		}
+		fmt.Printf(" %s %-9s %-28s [%s]", marker, operation.Action, operation.Path, operation.Origin)
+		if operation.Message != "" {
+			fmt.Printf(" — %s", operation.Message)
+		}
+		fmt.Println()
+	}
+	printDeployWarnings("Server warnings", plan.Warnings)
+}
+
+func applySmartCloudDefaults(cfg *deployConfigFile, current *deployContainerSnapshotResponse) {
+	if current == nil || len(cfg.Deploy.Ports) == 0 {
+		return
+	}
+	remaining := append([]cliDeploymentPort(nil), current.Container.Ports...)
+	for idx := range cfg.Deploy.Ports {
+		local := &cfg.Deploy.Ports[idx]
+		match := -1
+		for cloudIdx, cloud := range remaining {
+			if local.ID != "" && local.ID == cloud.ID {
+				match = cloudIdx
+				break
+			}
+			if local.Container == cloud.Container && normalizePortProtocol(local.Protocol) == normalizePortProtocol(cloud.Protocol) {
+				match = cloudIdx
+				break
+			}
+		}
+		// Version-1 manifests could only express TCP/UDP and therefore encoded
+		// dashboard HTTP ports as TCP. A unique cloud port on the same container
+		// port is the authoritative protocol in smart mode.
+		if match < 0 && cfg.Version < 2 {
+			for cloudIdx, cloud := range remaining {
+				if local.Container == cloud.Container {
+					if match >= 0 {
+						match = -1
+						break
+					}
+					match = cloudIdx
+				}
+			}
+		}
+		if match < 0 {
+			continue
+		}
+		cloud := remaining[match]
+		local.ID = cloud.ID
+		if cfg.Version < 2 {
+			local.Protocol = normalizePortProtocol(cloud.Protocol)
+		}
+		remaining = append(remaining[:match], remaining[match+1:]...)
+	}
 }
 
 func applyDeployOverrides(cfg *deployConfigFile, opts deployOptions) {
@@ -266,6 +516,15 @@ func isMissingBoundContainerError(err error) bool {
 	}
 
 	return strings.Contains(apiErr.Message, "Bound container not found in this project.")
+}
+
+func isActiveDeploymentConflict(err error) bool {
+	apiErr, ok := err.(*apiError)
+	if !ok || apiErr.Status != http.StatusConflict {
+		return false
+	}
+	message := strings.ToLower(apiErr.Message)
+	return strings.Contains(message, "already active") || strings.Contains(message, "active deployment")
 }
 
 func prepareDeployBuild(projectDir, cfgPath string, cfg *deployConfigFile, requestedBuilderVersion string) (deployPreparedBuild, error) {
@@ -814,6 +1073,13 @@ func openDeployConfigEditor(path string) error {
 }
 
 func buildDeploymentConfig(cfg deployConfigFile) cliDeploymentConfig {
+	managedFields := make([]string, 0, len(cfg.Specified))
+	for field, specified := range cfg.Specified {
+		if specified {
+			managedFields = append(managedFields, field)
+		}
+	}
+	sort.Strings(managedFields)
 	volumes := make([]cliDeploymentVolume, 0, len(cfg.Deploy.Volumes))
 	for _, volume := range cfg.Deploy.Volumes {
 		name := strings.TrimSpace(volume.Name)
@@ -833,6 +1099,7 @@ func buildDeploymentConfig(cfg deployConfigFile) cliDeploymentConfig {
 			continue
 		}
 		ports = append(ports, cliDeploymentPort{
+			ID:        strings.TrimSpace(port.ID),
 			Container: port.Container,
 			Protocol:  normalizePortProtocol(port.Protocol),
 			Host:      port.Host,
@@ -921,11 +1188,16 @@ func buildDeploymentConfig(cfg deployConfigFile) cliDeploymentConfig {
 			Type:        "docker",
 			DockerImage: "",
 		},
+		Remove:          cfg.Remove,
+		ManagedFields:   managedFields,
+		ManifestVersion: cfg.Version,
 	}
 }
 
 func normalizePortProtocol(value string) string {
 	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "HTTP":
+		return "HTTP"
 	case "UDP":
 		return "UDP"
 	default:
