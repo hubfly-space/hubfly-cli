@@ -16,6 +16,39 @@ func fetchWhoAmI(token string) (user, error) {
 	return u, err
 }
 
+type deviceLoginStart struct {
+	DeviceCode      string `json:"deviceCode"`
+	UserCode        string `json:"userCode"`
+	VerificationURL string `json:"verificationUrl"`
+	ExpiresIn       int    `json:"expiresIn"`
+	Interval        int    `json:"interval"`
+}
+
+type deviceLoginToken struct {
+	Status string `json:"status"`
+	Token  string `json:"token,omitempty"`
+}
+
+func startDeviceLogin() (deviceLoginStart, error) {
+	var payload deviceLoginStart
+	err := doJSONRequest(http.MethodPost, apiHost+"/api/v1/cli/auth/device/start", "", struct {
+		Scopes []string `json:"scopes"`
+	}{Scopes: []string{}}, &payload)
+	return payload, err
+}
+
+func pollDeviceLogin(deviceCode string) (deviceLoginToken, error) {
+	var payload deviceLoginToken
+	err := doJSONRequest(http.MethodPost, apiHost+"/api/v1/cli/auth/device/token", "", struct {
+		DeviceCode string `json:"deviceCode"`
+	}{DeviceCode: deviceCode}, &payload)
+	return payload, err
+}
+
+func revokeCurrentToken(token string) error {
+	return doJSONRequest(http.MethodPost, apiHost+"/api/v1/cli/auth/logout", token, struct{}{}, nil)
+}
+
 func fetchProjects(token string) ([]project, error) {
 	var payload projectsResponse
 	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/projects", token, nil, &payload)
@@ -140,6 +173,32 @@ func createDeploySession(token string, req createDeploySessionRequest) (deploySe
 	return payload, err
 }
 
+func createDeployPlan(token string, req createDeployPlanRequest) (deployPlanResponse, error) {
+	var payload deployPlanResponse
+	err := doJSONRequest(http.MethodPost, apiHost+"/api/v1/cli/deploy/plans", token, req, &payload)
+	return payload, err
+}
+
+func fetchActiveDeploySession(token, containerID string) (activeDeploySessionResponse, error) {
+	var payload activeDeploySessionResponse
+	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/cli/deploy/containers/"+url.PathEscape(containerID)+"/active-session", token, nil, &payload)
+	return payload, err
+}
+
+func cancelDeploySession(token, buildID string) error {
+	return doJSONRequest(http.MethodPost, apiHost+"/api/v1/cli/deploy/sessions/"+url.PathEscape(buildID)+"/cancel", token, struct{}{}, nil)
+}
+
+func retryDeploySession(token, buildID string) error {
+	return doJSONRequest(http.MethodPost, apiHost+"/api/v1/cli/deploy/sessions/"+url.PathEscape(buildID)+"/retry", token, struct{}{}, nil)
+}
+
+func fetchDeploySessionEvents(token, buildID string) (deploySessionEventsResponse, error) {
+	var payload deploySessionEventsResponse
+	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/cli/deploy/sessions/"+url.PathEscape(buildID)+"/events", token, nil, &payload)
+	return payload, err
+}
+
 func fetchDeploySession(token, buildID string) (deploySessionStatusResponse, error) {
 	var payload deploySessionStatusResponse
 	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/cli/deploy/sessions/"+buildID, token, nil, &payload)
@@ -166,6 +225,27 @@ func reportDeployFailure(token, buildID, uploadToken, errorMessage string) error
 	return doJSONRequest(
 		http.MethodPost,
 		apiHost+"/api/v1/cli/deploy/sessions/"+url.PathEscape(buildID)+"/fail",
+		token,
+		body,
+		nil,
+	)
+}
+
+func completeDeployUpload(token string, session deploySessionResponse, digest string) error {
+	body := struct {
+		UploadToken    string `json:"uploadToken"`
+		Digest         string `json:"digest"`
+		CanonicalRef   string `json:"canonicalRef"`
+		IdempotencyKey string `json:"idempotencyKey"`
+	}{
+		UploadToken:    session.Upload.Token,
+		Digest:         digest,
+		CanonicalRef:   session.Upload.CanonicalRef,
+		IdempotencyKey: "cli-complete:" + session.BuildID + ":" + digest,
+	}
+	return doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/cli/deploy/sessions/"+url.PathEscape(session.BuildID)+"/complete",
 		token,
 		body,
 		nil,
@@ -208,7 +288,10 @@ func fetchContainerLogs(token, projectID, containerID string) (containerLogsOutp
 }
 
 func doJSONRequest(method, url, token string, body any, out any) error {
-	return doJSONRequestWithTimeout(method, url, token, body, out, 20*time.Second)
+	// Container snapshots may perform a regional Hubnet inspection and can
+	// legitimately take longer than a normal API request. Keep the CLI from
+	// reporting a false timeout while retaining an explicit upper bound.
+	return doJSONRequestWithTimeout(method, url, token, body, out, 45*time.Second)
 }
 
 func doJSONRequestWithTimeout(method, url, token string, body any, out any, timeout time.Duration) error {
@@ -239,7 +322,7 @@ func doJSONRequestWithTimeout(method, url, token string, body any, out any, time
 		debugf("Authorization: Bearer %s", maskToken(token))
 	}
 	if len(requestBytes) > 0 {
-		debugf("Request body: %s", string(requestBytes))
+		debugf("Request body: %s", redactJSONForDebug(requestBytes))
 	}
 
 	client := &http.Client{Timeout: timeout}
@@ -257,7 +340,7 @@ func doJSONRequestWithTimeout(method, url, token string, body any, out any, time
 
 	debugf("HTTP response status: %d", resp.StatusCode)
 	if len(respBytes) > 0 {
-		debugf("Response body: %s", string(respBytes))
+		debugf("Response body: %s", redactJSONForDebug(respBytes))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -332,4 +415,41 @@ func doJSONRequestWithTimeout(method, url, token string, body any, out any, time
 	}
 
 	return json.Unmarshal(respBytes, out)
+}
+
+func redactJSONForDebug(payload []byte) string {
+	var value any
+	if json.Unmarshal(payload, &value) != nil {
+		return "<non-json payload omitted>"
+	}
+	var redact func(any, string) any
+	redact = func(item any, parentKey string) any {
+		switch typed := item.(type) {
+		case map[string]any:
+			secret := typed["isSecret"] == true || typed["secret"] == true
+			result := make(map[string]any, len(typed))
+			for key, child := range typed {
+				lower := strings.ToLower(key)
+				if lower == "token" || lower == "uploadtoken" || lower == "accesstoken" || lower == "valueciphertext" || (secret && lower == "value") {
+					result[key] = "***"
+					continue
+				}
+				result[key] = redact(child, key)
+			}
+			return result
+		case []any:
+			result := make([]any, len(typed))
+			for index, child := range typed {
+				result[index] = redact(child, parentKey)
+			}
+			return result
+		default:
+			return item
+		}
+	}
+	redacted, err := json.Marshal(redact(value, ""))
+	if err != nil {
+		return "<json payload omitted>"
+	}
+	return string(redacted)
 }
