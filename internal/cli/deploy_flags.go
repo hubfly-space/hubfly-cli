@@ -20,6 +20,12 @@ type deployOptions struct {
 	DockerfilePath string
 	BuilderVersion string
 	Org            string
+	Mode           string
+	ModeExplicit   bool
+	ForceNew       bool
+	PlanOnly       bool
+	PullOnly       bool
+	JSON           bool
 }
 
 func parseDeployOptions(args []string) (deployOptions, error) {
@@ -27,6 +33,14 @@ func parseDeployOptions(args []string) (deployOptions, error) {
 	rest := cloneStrings(args)
 	if len(rest) > 0 && rest[0] == "advanced" {
 		opts.Advanced = true
+		rest = rest[1:]
+	}
+	if len(rest) > 0 && rest[0] == "plan" {
+		opts.PlanOnly = true
+		rest = rest[1:]
+	}
+	if len(rest) > 0 && rest[0] == "pull" {
+		opts.PullOnly = true
 		rest = rest[1:]
 	}
 
@@ -41,11 +55,23 @@ func parseDeployOptions(args []string) (deployOptions, error) {
 	fs.StringVar(&opts.DockerfilePath, "dockerfile", "", "override the Dockerfile path for this deploy")
 	fs.StringVar(&opts.BuilderVersion, "builder-version", "", "pin a specific hubfly-builder release tag, for example v1.7.1")
 	fs.StringVar(&opts.Org, "org", "", "filter projects by organization ID or slug")
+	fs.StringVar(&opts.Mode, "mode", "smart", "configuration apply mode: smart or replace")
+	fs.BoolVar(&opts.ForceNew, "force-new", false, "supersede an active deployment")
+	fs.BoolVar(&opts.JSON, "json", false, "emit machine-readable JSON")
 	if err := fs.Parse(rest); err != nil {
 		return deployOptions{}, fmt.Errorf("%w\n%s", err, deployUsage())
 	}
 	if len(fs.Args()) > 0 {
 		return deployOptions{}, fmt.Errorf("unexpected deploy arguments: %s\n%s", strings.Join(fs.Args(), " "), deployUsage())
+	}
+	fs.Visit(func(value *flag.Flag) {
+		if value.Name == "mode" {
+			opts.ModeExplicit = true
+		}
+	})
+	opts.Mode = strings.ToLower(strings.TrimSpace(opts.Mode))
+	if opts.Mode != "smart" && opts.Mode != "replace" {
+		return deployOptions{}, fmt.Errorf("invalid deploy mode %q: expected smart or replace", opts.Mode)
 	}
 	return opts, nil
 }
