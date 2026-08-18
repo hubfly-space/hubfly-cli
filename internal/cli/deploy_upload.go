@@ -14,29 +14,33 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-func uploadLocalImage(localTag string, session deploySessionResponse) error {
+func uploadLocalImage(localTag string, session deploySessionResponse) (string, error) {
 	if session.Upload.Mode != "direct_registry" {
-		return fmt.Errorf("server returned unsupported upload mode %q", session.Upload.Mode)
+		return "", fmt.Errorf("server returned unsupported upload mode %q", session.Upload.Mode)
 	}
 	if strings.TrimSpace(session.Upload.PushRef) == "" {
-		return fmt.Errorf("server did not return a registry push reference")
+		return "", fmt.Errorf("server did not return a registry push reference")
 	}
 	if strings.TrimSpace(session.Upload.CanonicalRef) == "" {
-		return fmt.Errorf("server did not return a canonical image reference")
+		return "", fmt.Errorf("server did not return a canonical image reference")
 	}
 	if strings.TrimSpace(session.Upload.Token) == "" {
-		return fmt.Errorf("server did not return an upload token")
+		return "", fmt.Errorf("server did not return an upload token")
 	}
 
 	printDeployStep("Registry push", session.Upload.CanonicalRef)
 
 	sourceRef, err := name.NewTag(localTag, name.WeakValidation)
 	if err != nil {
-		return fmt.Errorf("invalid local image tag %q: %w", localTag, err)
+		return "", fmt.Errorf("invalid local image tag %q: %w", localTag, err)
 	}
 	img, err := daemon.Image(sourceRef)
 	if err != nil {
-		return fmt.Errorf("read local docker image %q: %w", localTag, err)
+		return "", fmt.Errorf("read local docker image %q: %w", localTag, err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		return "", fmt.Errorf("calculate local image digest: %w", err)
 	}
 
 	tagOptions := []name.Option{name.WeakValidation}
@@ -45,7 +49,7 @@ func uploadLocalImage(localTag string, session deploySessionResponse) error {
 	}
 	targetRef, err := name.NewTag(session.Upload.PushRef, tagOptions...)
 	if err != nil {
-		return fmt.Errorf("invalid registry push reference %q: %w", session.Upload.PushRef, err)
+		return "", fmt.Errorf("invalid registry push reference %q: %w", session.Upload.PushRef, err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
@@ -76,8 +80,8 @@ func uploadLocalImage(localTag string, session deploySessionResponse) error {
 	}
 	err = remote.Write(targetRef, img, writeOptions...)
 	if err != nil {
-		return fmt.Errorf("push image to regional registry: %w", err)
+		return "", fmt.Errorf("push image to regional registry: %w", err)
 	}
 
-	return nil
+	return digest.String(), nil
 }
