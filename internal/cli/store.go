@@ -3,9 +3,15 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/zalando/go-keyring"
 )
+
+const credentialService = "hubfly-cli"
+const credentialAccount = "default"
 
 func hubflyDir() string {
 	return filepath.Join(userHomeDir(), ".hubfly")
@@ -32,6 +38,9 @@ func userHomeDir() string {
 }
 
 func getToken() (string, error) {
+	if token, err := keyring.Get(credentialService, credentialAccount); err == nil {
+		return token, nil
+	}
 	content, err := os.ReadFile(configPath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -47,6 +56,11 @@ func getToken() (string, error) {
 }
 
 func setToken(token string) error {
+	if err := keyring.Set(credentialService, credentialAccount, token); err == nil {
+		_ = os.Remove(configPath())
+		return nil
+	}
+	fmt.Fprintln(os.Stderr, "Warning: OS credential store is unavailable; saving the token in a mode-0600 fallback file.")
 	if err := os.MkdirAll(hubflyDir(), 0o700); err != nil {
 		return err
 	}
@@ -59,6 +73,10 @@ func setToken(token string) error {
 }
 
 func deleteToken() error {
+	keyringErr := keyring.Delete(credentialService, credentialAccount)
+	if keyringErr != nil && !errors.Is(keyringErr, keyring.ErrNotFound) {
+		fmt.Fprintf(os.Stderr, "Warning: could not clear OS credential store: %v\n", keyringErr)
+	}
 	err := os.Remove(configPath())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
