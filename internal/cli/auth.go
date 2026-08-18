@@ -3,7 +3,10 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"strings"
+	"time"
 )
 
 const cliAuthURL = "https://dashboard.hubfly.space/cli/auth"
@@ -30,36 +33,51 @@ func login(providedToken string) error {
 		return authRequiredError()
 	}
 
-	emptyAttempts := 0
-	for {
-		fmt.Printf("Please authenticate to continue. Go to %s to get the token\n", cliAuthURL)
-		input, err := prompt("Enter your API token: ")
-		if err != nil {
-			return err
+	started, err := startDeviceLogin()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Open %s\n", started.VerificationURL)
+	fmt.Printf("One-time code: %s\n", started.UserCode)
+	_ = openBrowser(started.VerificationURL)
+	deadline := time.Now().Add(time.Duration(started.ExpiresIn) * time.Second)
+	interval := time.Duration(started.Interval) * time.Second
+	if interval < time.Second {
+		interval = 3 * time.Second
+	}
+	for time.Now().Before(deadline) {
+		time.Sleep(interval)
+		result, pollErr := pollDeviceLogin(started.DeviceCode)
+		if pollErr != nil {
+			return pollErr
 		}
-		input = strings.TrimSpace(input)
-		if input == "" {
-			emptyAttempts++
-			if emptyAttempts >= 3 {
-				return authRequiredError()
-			}
-			fmt.Println("Token cannot be empty.")
+		if result.Status != "approved" || result.Token == "" {
 			continue
 		}
-		emptyAttempts = 0
-
-		u, authErr := fetchWhoAmI(input)
+		u, authErr := fetchWhoAmI(result.Token)
 		if authErr != nil {
-			fmt.Printf("Authentication failed: %v\n", authErr)
-			continue
+			return authErr
 		}
-
-		if err := setToken(input); err != nil {
+		if err := setToken(result.Token); err != nil {
 			return err
 		}
 		fmt.Printf("Successfully logged in as %s (%s)\n", u.Name, u.Email)
 		return nil
 	}
+	return fmt.Errorf("device login timed out")
+}
+
+func openBrowser(target string) error {
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		command = exec.Command("open", target)
+	case "windows":
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
+	default:
+		command = exec.Command("xdg-open", target)
+	}
+	return command.Start()
 }
 
 func ensureAuth(silent bool) (string, error) {
