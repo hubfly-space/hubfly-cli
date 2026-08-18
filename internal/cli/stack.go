@@ -519,6 +519,7 @@ func deployBuiltStackService(
 	deploymentConfig := buildStackDeploymentConfig(projectCfg, service, volumeBindings)
 	session, err := createDeploySession(token, createDeploySessionRequest{
 		BoundContainerID: strings.TrimSpace(binding.ContainerID),
+		ApplyMode:        "smart",
 		Config:           deploymentConfig,
 	})
 	if err != nil {
@@ -535,9 +536,13 @@ func deployBuiltStackService(
 	defer func() { _ = removeLocalImage(localTag) }()
 
 	printDeployStep("Image upload", fmt.Sprintf("Streaming image to %s (%s)", session.Region.Name, session.Region.PrimaryIP))
-	if err := uploadLocalImage(localTag, session); err != nil {
+	imageDigest, err := uploadLocalImage(localTag, session)
+	if err != nil {
 		_ = reportDeployFailure(token, session.BuildID, session.Upload.Token, "Stack image upload failed: "+err.Error())
 		return stackServiceState{}, err
+	}
+	if err := completeDeployUpload(token, session, imageDigest); err != nil {
+		return stackServiceState{}, fmt.Errorf("finalize service %s upload: %w", service.Name, err)
 	}
 
 	status, err := waitForDeploySession(token, session.BuildID)
