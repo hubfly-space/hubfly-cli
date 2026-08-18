@@ -127,6 +127,9 @@ func printDeployDiffPlan(plan deployDiffPlan) {
 }
 
 func confirmDeployPlan(opts deployOptions, plan deployDiffPlan) error {
+	if !isInteractiveShell() && plan.HasCurrent && !opts.ModeExplicit {
+		return fmt.Errorf("non-interactive updates require an explicit --mode smart|replace")
+	}
 	if opts.AutoApprove {
 		return nil
 	}
