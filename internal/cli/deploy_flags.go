@@ -29,7 +29,10 @@ type deployOptions struct {
 }
 
 func parseDeployOptions(args []string) (deployOptions, error) {
-	var opts deployOptions
+	// The documented `hubfly deploy --yes` workflow has always used smart
+	// apply by default. Keep that workflow non-interactive without requiring
+	// users to learn the internal --mode flag.
+	opts := deployOptions{Mode: "smart", ModeExplicit: true}
 	rest := cloneStrings(args)
 	if len(rest) > 0 && rest[0] == "advanced" {
 		opts.Advanced = true
