@@ -78,6 +78,12 @@ Override it for local or staging environments:
 HUBFLY_API_URL=http://127.0.0.1:3000 hubfly whoami
 ```
 
+For CI, set `HUBFLY_TOKEN` instead of storing a local session:
+
+```bash
+HUBFLY_TOKEN=hf_... hubfly deploy --project my-api --region eu-1 --yes
+```
+
 API errors include the backend trace ID when the dashboard returns one, for example:
 
 ```text
