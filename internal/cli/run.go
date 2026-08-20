@@ -66,13 +66,54 @@ func run(args []string) error {
 	switch args[0] {
 	case "auth":
 		return runAuthGroup(args[1:])
-	case "project":
-		if len(args) == 2 && args[1] == "list" {
-			return projectsFlow("")
+	case "login":
+		return runAuthGroup(append([]string{"login"}, args[1:]...))
+	case "logout":
+		return runAuthGroup([]string{"logout"})
+	case "whoami":
+		return runAuthGroup([]string{"status"})
+	case "projects":
+		orgFilter, err := parseOrgFilter(args[1:])
+		if err != nil {
+			return err
 		}
-		return errors.New("usage: hubfly project list")
+		return projectsFlow(orgFilter)
+	case "orgs", "org", "organizations":
+		return organizationsFlow()
+	case "project":
+		if len(args) >= 2 && args[1] == "list" {
+			orgFilter, err := parseOrgFilter(args[2:])
+			if err != nil {
+				return err
+			}
+			return projectsFlow(orgFilter)
+		}
+		return errors.New("usage: hubfly project list [--org <id|slug>]")
 	case "container":
 		return runContainerGroup(args[1:])
+	case "logs":
+		if len(args) < 2 {
+			return errors.New("usage: hubfly logs <containerIdOrName> [--follow|-f]")
+		}
+		return logsFlow(args[1], len(args) > 2 && (args[2] == "--follow" || args[2] == "-f"))
+	case "ssh":
+		return runLegacyExecCommand("ssh", args[1:])
+	case "exec":
+		return runLegacyExecCommand("exec", args[1:])
+	case "tunnel":
+		if len(args) != 4 {
+			return errors.New("usage: hubfly tunnel <containerIdOrName> <localPort> <targetPort>")
+		}
+		localPort, localErr := strconv.Atoi(args[2])
+		targetPort, targetErr := strconv.Atoi(args[3])
+		if localErr != nil || targetErr != nil || localPort <= 0 || targetPort <= 0 {
+			return errors.New("invalid tunnel port")
+		}
+		return tunnelFlow(args[1], localPort, targetPort)
+	case "stack":
+		return stackFlow(args[1:])
+	case "build":
+		return runBuildCommand(args[1:])
 	case "deploy":
 		return runDeployGroup(args[1:])
 	case "compose":
@@ -91,6 +132,32 @@ func run(args []string) error {
 		printUsage()
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
+}
+
+func parseOrgFilter(args []string) (string, error) {
+	if len(args) == 0 {
+		return "", nil
+	}
+	if len(args) == 2 && args[0] == "--org" && strings.TrimSpace(args[1]) != "" {
+		return args[1], nil
+	}
+	return "", errors.New("usage: hubfly projects [--org <id|slug>]")
+}
+
+func runLegacyExecCommand(command string, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: hubfly %s <containerIdOrName> [-- <cmd> [args...]]", command)
+	}
+	if len(args) == 1 {
+		if command == "ssh" {
+			return sshFlow(args[0])
+		}
+		return fmt.Errorf("usage: hubfly exec <containerIdOrName> -- <cmd> [args...]")
+	}
+	if len(args) >= 3 && args[1] == "--" {
+		return execFlow(args[0], args[2:], 55*time.Second)
+	}
+	return fmt.Errorf("usage: hubfly %s <containerIdOrName> -- <cmd> [args...]", command)
 }
 
 func runDeployGroup(args []string) error {
@@ -205,12 +272,27 @@ func runContainerGroup(args []string) error {
 }
 
 func printUsage() {
-	fmt.Println("Hubfly CLI v2")
+	fmt.Println("Hubfly CLI")
 	fmt.Println("Usage:")
+	fmt.Println("  hubfly login [--token <TOKEN>]")
+	fmt.Println("  hubfly logout")
+	fmt.Println("  hubfly whoami")
+	fmt.Println("  hubfly projects [--org <id|slug>]")
+	fmt.Println("  hubfly orgs")
+	fmt.Println("  hubfly deploy [advanced|--advanced] [--project <id|name|new>] [--region <region>] [--yes]")
+	fmt.Println("              [--config <path>] [--detach] [--dockerfile <path>] [--builder-version <tag>]")
+	fmt.Println("  hubfly stack <plan|up|status|logs|exec|ssh|down> [options]")
+	fmt.Println("  hubfly build <init|validate|edit|explain> [options]")
+	fmt.Println("  hubfly tunnel <containerIdOrName> <localPort> <targetPort>")
+	fmt.Println("  hubfly ssh <containerIdOrName> [-- <cmd> [args...]]")
+	fmt.Println("  hubfly exec <containerIdOrName> -- <cmd> [args...]")
+	fmt.Println("  hubfly logs <containerIdOrName> [--follow|-f]")
+	fmt.Println("  hubfly service [--port <port>]")
+	fmt.Println("")
+	fmt.Println("Aliases:")
 	fmt.Println("  hubfly auth <login|logout|status>")
-	fmt.Println("  hubfly project list")
+	fmt.Println("  hubfly project list [--org <id|slug>]")
 	fmt.Println("  hubfly container <logs|exec|ssh|tunnel> ...")
-	fmt.Println("  hubfly deploy [plan|pull] [--mode smart|replace] [--yes] [options]")
 	fmt.Println("  hubfly compose <plan|up|status|logs|exec|ssh|down> [options]")
 	fmt.Println("  hubfly config <validate|migrate|explain>")
 	fmt.Println("  hubfly update [--check]")
