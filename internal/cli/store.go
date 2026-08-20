@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/zalando/go-keyring"
 )
@@ -38,6 +39,9 @@ func userHomeDir() string {
 }
 
 func getToken() (string, error) {
+	if token := strings.TrimSpace(os.Getenv("HUBFLY_TOKEN")); token != "" {
+		return token, nil
+	}
 	if token, err := keyring.Get(credentialService, credentialAccount); err == nil {
 		return token, nil
 	}
