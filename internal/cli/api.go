@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -312,6 +313,9 @@ func doJSONRequestWithTimeout(method, url, token string, body any, out any, time
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if subaccount := strings.TrimSpace(os.Getenv("HUBFLY_SUBACCOUNT")); subaccount != "" {
+		req.Header.Set("X-HubFly-Subaccount", subaccount)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
