@@ -52,21 +52,32 @@ type region struct {
 	Available       bool   `json:"available"`
 	PrimaryIP       string `json:"primaryIP"`
 	PrimaryProvider string `json:"primaryProvider"`
+	Products        *struct {
+		Cell bool `json:"cell"`
+	} `json:"products,omitempty"`
 }
 
 type project struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
+	Type      string `json:"type"`
 	Status    string `json:"status"`
 	Role      string `json:"role"`
 	CreatedAt string `json:"createdAt"`
 	Spent     string `json:"spentAmount"`
 	Monthly   string `json:"monthlyCost"`
 	Region    region `json:"region"`
+	// The projects endpoint now returns region data as flat fields. Keep the
+	// nested Region field for compatibility with older Dashboard deployments.
+	RegionID       string `json:"regionId"`
+	RegionName     string `json:"regionName"`
+	RegionLocation string `json:"regionLocation"`
 }
 
 type projectsResponse struct {
-	Projects []project `json:"items"`
+	Projects  []project `json:"items"`
+	Page      int       `json:"page"`
+	PageCount int       `json:"pageCount"`
 }
 
 type container struct {
@@ -141,12 +152,12 @@ type createTunnelRequest struct {
 }
 
 type tunnelTarget struct {
-	TargetID       string `json:"targetId"`
-	ContainerID    string `json:"containerId"`
-	ContainerName  string `json:"containerName"`
-	RuntimeID      string `json:"runtimeId"`
-	TargetPort     int    `json:"targetPort"`
-	LocalPort      int    `json:"localPort"`
+	TargetID      string `json:"targetId"`
+	ContainerID   string `json:"containerId"`
+	ContainerName string `json:"containerName"`
+	RuntimeID     string `json:"runtimeId"`
+	TargetPort    int    `json:"targetPort"`
+	LocalPort     int    `json:"localPort"`
 }
 
 type tunnelLimits struct {
