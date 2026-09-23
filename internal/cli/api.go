@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -51,25 +52,68 @@ func revokeCurrentToken(token string) error {
 }
 
 func fetchProjects(token string) ([]project, error) {
-	var payload projectsResponse
-	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/projects", token, nil, &payload)
-	return payload.Projects, err
+	return fetchAllProjects(token, "")
 }
 
 func fetchProjectsWithOrg(token, orgID string) ([]project, error) {
-	var payload projectsResponse
-	requestURL := apiHost + "/api/v1/projects"
-	if orgID != "" {
-		requestURL += "?organizationId=" + url.QueryEscape(orgID)
+	return fetchAllProjects(token, orgID)
+}
+
+func fetchAllProjects(token, orgID string) ([]project, error) {
+	projects := make([]project, 0)
+	for page := 1; ; page++ {
+		query := url.Values{}
+		query.Set("page", fmt.Sprintf("%d", page))
+		if orgID != "" {
+			query.Set("organizationId", orgID)
+		}
+		var payload projectsResponse
+		requestURL := apiHost + "/api/v1/projects?" + query.Encode()
+		if err := doJSONRequest(http.MethodGet, requestURL, token, nil, &payload); err != nil {
+			return nil, err
+		}
+		for _, item := range payload.Projects {
+			// Deploy/stack commands operate on cell projects. Newer project-list
+			// responses also include box and storage projects.
+			if item.Type != "" && item.Type != "cell" {
+				continue
+			}
+			projects = append(projects, normalizeProject(item))
+		}
+		if payload.PageCount <= page || payload.PageCount == 0 {
+			break
+		}
 	}
-	err := doJSONRequest(http.MethodGet, requestURL, token, nil, &payload)
-	return payload.Projects, err
+	return projects, nil
+}
+
+func normalizeProject(item project) project {
+	if item.Region.ID == "" {
+		item.Region.ID = item.RegionID
+	}
+	if item.Region.Name == "" {
+		item.Region.Name = item.RegionName
+	}
+	if item.Region.Location == "" {
+		item.Region.Location = item.RegionLocation
+	}
+	return item
 }
 
 func fetchRegions(token string) ([]region, error) {
 	var payload []region
 	err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/regions", token, nil, &payload)
+	for index := range payload {
+		payload[index] = normalizeRegion(payload[index])
+	}
 	return payload, err
+}
+
+func normalizeRegion(item region) region {
+	if item.Products != nil {
+		item.Available = item.Products.Cell
+	}
+	return item
 }
 
 func fetchProject(token, projectID string) (projectDetails, error) {
@@ -148,12 +192,13 @@ func createProjectForDeploy(token, name, regionID, orgID string) (project, error
 	body := map[string]string{
 		"name":     name,
 		"regionId": regionID,
+		"type":     "cell",
 	}
 	if orgID != "" {
 		body["organizationId"] = orgID
 	}
 	err := doJSONRequest(http.MethodPost, apiHost+"/api/v1/projects/create", token, body, &payload)
-	return payload, err
+	return normalizeProject(payload), err
 }
 
 func fetchTunnels(token, projectID string) ([]tunnel, error) {
