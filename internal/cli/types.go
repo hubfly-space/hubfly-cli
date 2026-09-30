@@ -188,4 +188,87 @@ type organization struct {
 	CreatedAt string `json:"createdAt"`
 }
 
+type Box struct {
+	ID                   string  `json:"id"`
+	ProjectID            string  `json:"projectId"`
+	ProjectName          string  `json:"projectName,omitempty"`
+	Name                 string  `json:"name"`
+	Status               string  `json:"status"`
+	ImageID              string  `json:"imageId"`
+	VCPUs                int     `json:"vcpus"`
+	MemoryMiB            int     `json:"memoryMib"`
+	RootDiskGiB          int     `json:"rootDiskGib"`
+	InitializationStatus string  `json:"initializationStatus"`
+	ActiveOperationID    *string `json:"activeOperationId"`
+	PrivateIPv4          *string `json:"privateIpv4"`
+	CreatedAt            string  `json:"createdAt,omitempty"`
+}
+
+type BoxImage struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Family      string `json:"family"`
+	Version     string `json:"version"`
+	DefaultUser string `json:"defaultUser"`
+}
+
+type BoxResizeInput struct {
+	VCPUs       int    `json:"vcpus,omitempty"`
+	MemoryMiB   int    `json:"memoryMib,omitempty"`
+	RootDiskGiB int    `json:"rootDiskGib,omitempty"`
+	Mode        string `json:"mode,omitempty"`
+}
+
+type BoxCreateInput struct {
+	ProjectID   string `json:"projectId"`
+	Name        string `json:"name"`
+	ImageID     string `json:"imageId"`
+	VCPUs       int    `json:"vcpus"`
+	MemoryMiB   int    `json:"memoryMib"`
+	RootDiskGiB int    `json:"rootDiskGib"`
+	Username    string `json:"username,omitempty"`
+	SSHKeys     []string `json:"sshKeys,omitempty"`
+}
+
+type ContainerDetails struct {
+	ID          string `json:"id"`
+	ProjectID   string `json:"projectId"`
+	ProjectName string `json:"projectName"`
+	Region      struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Location string `json:"location"`
+	} `json:"region"`
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Tier   string `json:"tier"`
+	Status string `json:"status"`
+	Source struct {
+		Type          string `json:"type"`
+		Template      string `json:"template,omitempty"`
+		GitRepository string `json:"gitRepository,omitempty"`
+		DockerImage   string `json:"dockerImage,omitempty"`
+		Branch        string `json:"branch,omitempty"`
+		DockerfilePath string `json:"dockerfilePath,omitempty"`
+	} `json:"source"`
+	Resources struct {
+		CPU     float64 `json:"cpu"`
+		RAM     float64 `json:"ram"`
+		Storage float64 `json:"storage"`
+	} `json:"resources"`
+	Networking struct {
+		Ports []struct {
+			ID        string `json:"id,omitempty"`
+			Protocol  string `json:"protocol"`
+			Container int    `json:"container"`
+			TunnelURL string `json:"tunnelUrl,omitempty"`
+		} `json:"ports"`
+	} `json:"networking"`
+	PrimaryNetworkAlias string `json:"primaryNetworkAlias"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
+	CanControl          bool   `json:"canControl"`
+}
+
 var stdin = bufio.NewReader(os.Stdin)
