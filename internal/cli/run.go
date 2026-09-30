@@ -89,8 +89,16 @@ func run(args []string) error {
 			return projectsFlow(orgFilter)
 		}
 		return errors.New("usage: hubfly project list [--org <id|slug>]")
-	case "container":
+	case "container", "containers", "c":
 		return runContainerGroup(args[1:])
+	case "vm", "vms", "box", "boxes":
+		return runVMGroup(args[1:])
+	case "start":
+		return runGlobalControlCommand("start", args[1:])
+	case "stop":
+		return runGlobalControlCommand("stop", args[1:])
+	case "restart":
+		return runGlobalControlCommand("restart", args[1:])
 	case "logs":
 		if len(args) < 2 {
 			return errors.New("usage: hubfly logs <containerIdOrName> [--follow|-f]")
@@ -235,64 +243,85 @@ func runAuthGroup(args []string) error {
 	}
 }
 
-func runContainerGroup(args []string) error {
-	if len(args) < 2 {
-		return errors.New("usage: hubfly container <logs|exec|ssh|tunnel> <container>")
+func runGlobalControlCommand(action string, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: hubfly %s <containerOrVmIdOrName>", action)
 	}
-	command, target := args[0], args[1]
-	switch command {
-	case "logs":
-		return logsFlow(target, len(args) > 2 && (args[2] == "--follow" || args[2] == "-f"))
-	case "ssh":
-		if len(args) == 2 {
-			return sshFlow(target)
-		}
-		if len(args) >= 4 && args[2] == "--" {
-			return execFlow(target, args[3:], 55*time.Second)
-		}
-		return errors.New("usage: hubfly container ssh <container> [-- <cmd> [args...]]")
-	case "exec":
-		if len(args) < 4 || args[2] != "--" {
-			return errors.New("usage: hubfly container exec <container> -- <cmd> [args...]")
-		}
-		return execFlow(target, args[3:], 55*time.Second)
-	case "tunnel":
-		if len(args) != 4 {
-			return errors.New("usage: hubfly container tunnel <container> <localPort> <targetPort>")
-		}
-		localPort, localErr := strconv.Atoi(args[2])
-		targetPort, targetErr := strconv.Atoi(args[3])
-		if localErr != nil || targetErr != nil || localPort <= 0 || targetPort <= 0 {
-			return errors.New("invalid tunnel port")
-		}
-		return tunnelFlow(target, localPort, targetPort)
-	default:
-		return fmt.Errorf("unknown container command %q", command)
+	target := args[0]
+	token, err := ensureAuth(true)
+	if err != nil {
+		return err
 	}
+
+	// Try finding as container first
+	c, _, cErr := findContainer(token, target)
+	if cErr == nil && c != nil {
+		return containerControlFlow(target, action)
+	}
+
+	// Try finding as box/vm
+	boxAction := action
+	if action == "stop" {
+		boxAction = "shutdown"
+	} else if action == "restart" {
+		boxAction = "reboot"
+	}
+	box, _, bErr := findBox(token, target)
+	if bErr == nil && box != nil {
+		return vmControlFlow(target, boxAction)
+	}
+
+	return fmt.Errorf("target '%s' not found as container or virtual machine", target)
 }
 
 func printUsage() {
-	fmt.Println("Hubfly CLI")
+	fmt.Println("Hubfly CLI - Cloud Containers, Virtual Machines & Stacks")
+	fmt.Println("")
 	fmt.Println("Usage:")
 	fmt.Println("  hubfly login [--token <TOKEN>]")
 	fmt.Println("  hubfly logout")
 	fmt.Println("  hubfly whoami")
 	fmt.Println("  hubfly projects [--org <id|slug>]")
 	fmt.Println("  hubfly orgs")
-	fmt.Println("  hubfly deploy [advanced|--advanced] [--project <id|name|new>] [--region <region>] [--yes]")
-	fmt.Println("              [--config <path>] [--detach] [--dockerfile <path>] [--builder-version <tag>]")
-	fmt.Println("  hubfly stack <plan|up|status|logs|exec|ssh|down> [options]")
-	fmt.Println("  hubfly build <init|validate|edit|explain> [options]")
+	fmt.Println("")
+	fmt.Println("Containers (Cells):")
+	fmt.Println("  hubfly container list [--project <id|name>] [--org <id|slug>]")
+	fmt.Println("  hubfly container inspect <containerIdOrName>")
+	fmt.Println("  hubfly container start <containerIdOrName>")
+	fmt.Println("  hubfly container stop <containerIdOrName>")
+	fmt.Println("  hubfly container restart <containerIdOrName>")
+	fmt.Println("  hubfly container delete <containerIdOrName> [--yes|-y]")
+	fmt.Println("  hubfly container logs <containerIdOrName> [--follow|-f]")
+	fmt.Println("  hubfly container ssh <containerIdOrName> [-- <cmd> [args...]]")
+	fmt.Println("  hubfly container exec <containerIdOrName> -- <cmd> [args...]")
+	fmt.Println("  hubfly container tunnel <containerIdOrName> <localPort> <targetPort>")
+	fmt.Println("")
+	fmt.Println("Virtual Machines (KVM Boxes):")
+	fmt.Println("  hubfly vm list [--project <id|name>] [--org <id|slug>]")
+	fmt.Println("  hubfly vm inspect <vmIdOrName>")
+	fmt.Println("  hubfly vm start <vmIdOrName>")
+	fmt.Println("  hubfly vm stop <vmIdOrName>")
+	fmt.Println("  hubfly vm restart <vmIdOrName>")
+	fmt.Println("  hubfly vm force-stop <vmIdOrName>")
+	fmt.Println("  hubfly vm resize <vmIdOrName> [--vcpu <n>] [--ram <mb>] [--disk <gb>] [--mode <mode>]")
+	fmt.Println("  hubfly vm delete <vmIdOrName> [--yes|-y]")
+	fmt.Println("  hubfly vm images")
+	fmt.Println("  hubfly vm create --name <name> --image <imageId> [--vcpu <n>] [--ram <mb>] [--disk <gb>]")
+	fmt.Println("")
+	fmt.Println("Shortcuts:")
+	fmt.Println("  hubfly start <containerOrVmIdOrName>")
+	fmt.Println("  hubfly stop <containerOrVmIdOrName>")
+	fmt.Println("  hubfly restart <containerOrVmIdOrName>")
 	fmt.Println("  hubfly tunnel <containerIdOrName> <localPort> <targetPort>")
 	fmt.Println("  hubfly ssh <containerIdOrName> [-- <cmd> [args...]]")
 	fmt.Println("  hubfly exec <containerIdOrName> -- <cmd> [args...]")
 	fmt.Println("  hubfly logs <containerIdOrName> [--follow|-f]")
-	fmt.Println("  hubfly service [--port <port>]")
 	fmt.Println("")
-	fmt.Println("Aliases:")
-	fmt.Println("  hubfly auth <login|logout|status>")
-	fmt.Println("  hubfly project list [--org <id|slug>]")
-	fmt.Println("  hubfly container <logs|exec|ssh|tunnel> ...")
+	fmt.Println("Deployment & Stacks:")
+	fmt.Println("  hubfly deploy [advanced|--advanced] [--project <id|name|new>] [--region <region>] [--yes]")
+	fmt.Println("              [--config <path>] [--detach] [--dockerfile <path>] [--builder-version <tag>]")
+	fmt.Println("  hubfly stack <plan|up|status|logs|exec|ssh|down> [options]")
+	fmt.Println("  hubfly build <init|validate|edit|explain> [options]")
 	fmt.Println("  hubfly compose <plan|up|status|logs|exec|ssh|down> [options]")
 	fmt.Println("  hubfly config <validate|migrate|explain>")
 	fmt.Println("  hubfly update [--check]")
