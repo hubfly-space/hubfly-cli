@@ -60,6 +60,14 @@ func fetchProjectsWithOrg(token, orgID string) ([]project, error) {
 }
 
 func fetchAllProjects(token, orgID string) ([]project, error) {
+	return fetchProjectsFiltered(token, orgID, "cell")
+}
+
+func fetchAllProjectsAnyType(token, orgID string) ([]project, error) {
+	return fetchProjectsFiltered(token, orgID, "")
+}
+
+func fetchProjectsFiltered(token, orgID, requiredType string) ([]project, error) {
 	projects := make([]project, 0)
 	for page := 1; ; page++ {
 		query := url.Values{}
@@ -73,9 +81,7 @@ func fetchAllProjects(token, orgID string) ([]project, error) {
 			return nil, err
 		}
 		for _, item := range payload.Projects {
-			// Deploy/stack commands operate on cell projects. Newer project-list
-			// responses also include box and storage projects.
-			if item.Type != "" && item.Type != "cell" {
+			if requiredType != "" && item.Type != "" && item.Type != requiredType {
 				continue
 			}
 			projects = append(projects, normalizeProject(item))
@@ -160,6 +166,240 @@ func removeProjectContainer(token, projectID, containerID string) error {
 		map[string]any{},
 		nil,
 	)
+}
+
+func controlProjectContainer(token, projectID, containerID, action string) error {
+	return doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/containers/"+containerID+"/control",
+		token,
+		map[string]any{"action": action},
+		nil,
+	)
+}
+
+func fetchContainerDetails(token, projectID, containerID string) (*ContainerDetails, error) {
+	var payload struct {
+		ContainerDetails
+		Container *ContainerDetails `json:"container"`
+	}
+	err := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/containers/"+containerID,
+		token,
+		nil,
+		&payload,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if payload.Container != nil {
+		return payload.Container, nil
+	}
+	res := payload.ContainerDetails
+	return &res, nil
+}
+
+func fetchProjectContainers(token, projectID string) ([]container, error) {
+	var payload struct {
+		Summary struct {
+			Total   int `json:"total"`
+			Running int `json:"running"`
+		} `json:"summary"`
+		Items      []container `json:"items"`
+		Containers []container `json:"containers"`
+	}
+	err := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/containers",
+		token,
+		nil,
+		&payload,
+	)
+	if err == nil {
+		if len(payload.Items) > 0 {
+			return payload.Items, nil
+		}
+		if len(payload.Containers) > 0 {
+			return payload.Containers, nil
+		}
+	}
+	var rawList []container
+	if listErr := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/containers",
+		token,
+		nil,
+		&rawList,
+	); listErr == nil && len(rawList) > 0 {
+		return rawList, nil
+	}
+	// Fallback to fetchProject which embeds the containers list
+	details, err := fetchProject(token, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return details.Containers, nil
+}
+
+func fetchProjectBoxes(token, projectID string) ([]Box, error) {
+	var payload []Box
+	err := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/boxes",
+		token,
+		nil,
+		&payload,
+	)
+	if err != nil {
+		var wrapped struct {
+			Boxes []Box `json:"boxes"`
+			Items []Box `json:"items"`
+		}
+		if wrapErr := doJSONRequest(
+			http.MethodGet,
+			apiHost+"/api/v1/projects/"+projectID+"/boxes",
+			token,
+			nil,
+			&wrapped,
+		); wrapErr == nil {
+			if len(wrapped.Boxes) > 0 {
+				payload = wrapped.Boxes
+			} else {
+				payload = wrapped.Items
+			}
+		} else {
+			return nil, err
+		}
+	}
+	for i := range payload {
+		payload[i].ProjectID = projectID
+	}
+	return payload, nil
+}
+
+func fetchBoxRuntime(token, projectID, boxID string) (*Box, error) {
+	var payload Box
+	err := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/boxes/"+boxID+"/runtime",
+		token,
+		nil,
+		&payload,
+	)
+	if err != nil {
+		return nil, err
+	}
+	payload.ProjectID = projectID
+	return &payload, nil
+}
+
+func controlProjectBox(token, projectID, boxID, action string) error {
+	return doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/boxes/"+boxID+"/control",
+		token,
+		map[string]any{"action": action},
+		nil,
+	)
+}
+
+func resizeProjectBox(token, projectID, boxID string, req BoxResizeInput) error {
+	body := map[string]any{}
+	if req.VCPUs > 0 {
+		body["vcpus"] = req.VCPUs
+	}
+	if req.MemoryMiB > 0 {
+		body["memoryMib"] = req.MemoryMiB
+	}
+	if req.RootDiskGiB > 0 {
+		body["rootDiskGib"] = req.RootDiskGiB
+	}
+	if req.Mode != "" {
+		body["mode"] = req.Mode
+	} else {
+		body["mode"] = "try_live_then_restart"
+	}
+	return doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/boxes/"+boxID+"/resize",
+		token,
+		body,
+		nil,
+	)
+}
+
+func removeProjectBox(token, projectID, boxID string) error {
+	return doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/boxes/"+boxID+"/delete",
+		token,
+		map[string]any{},
+		nil,
+	)
+}
+
+func fetchProjectBoxImages(token, projectID string) ([]BoxImage, error) {
+	var payload []BoxImage
+	err := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/boxes/images",
+		token,
+		nil,
+		&payload,
+	)
+	if err == nil {
+		return payload, nil
+	}
+	var wrapped struct {
+		Images []BoxImage `json:"images"`
+		Items  []BoxImage `json:"items"`
+	}
+	wrapErr := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/boxes/images",
+		token,
+		nil,
+		&wrapped,
+	)
+	if wrapErr == nil {
+		if len(wrapped.Images) > 0 {
+			return wrapped.Images, nil
+		}
+		return wrapped.Items, nil
+	}
+	return nil, err
+}
+
+func createProjectBox(token, projectID string, req BoxCreateInput) (*Box, error) {
+	req.ProjectID = projectID
+	var payload struct {
+		Box
+		ID          string `json:"id"`
+		OperationID string `json:"operationId"`
+	}
+	err := doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/boxes/create",
+		token,
+		req,
+		&payload,
+	)
+	if err != nil {
+		return nil, err
+	}
+	res := payload.Box
+	if res.ID == "" {
+		res.ID = payload.ID
+	}
+	if res.Name == "" {
+		res.Name = req.Name
+	}
+	if res.Status == "" {
+		res.Status = "provisioning"
+	}
+	res.ProjectID = projectID
+	return &res, nil
 }
 
 func createProjectVolume(
