@@ -271,4 +271,95 @@ type ContainerDetails struct {
 	CanControl          bool   `json:"canControl"`
 }
 
+type ContainerStatsSnapshot struct {
+	Time                string  `json:"time"`
+	CPUPercent          float64 `json:"cpuPercent"`
+	MemoryUsageBytes    int64   `json:"memoryUsageBytes"`
+	MemoryLimitBytes    int64   `json:"memoryLimitBytes"`
+	MemoryUsagePercent  float64 `json:"memoryUsagePercent"`
+	StorageUsedBytes    int64   `json:"storageUsedBytes"`
+	StorageTotalBytes   int64   `json:"storageTotalBytes"`
+	StorageUsagePercent float64 `json:"storageUsagePercent"`
+	Processes           int     `json:"processes"`
+	NetworkRxBytes      int64   `json:"networkRxBytes"`
+	NetworkTxBytes      int64   `json:"networkTxBytes"`
+}
+
+type ContainerMetricsResponse struct {
+	Latest ContainerStatsSnapshot `json:"latest"`
+}
+
+type BoxMetrics struct {
+	SampledAt int64                  `json:"sampledAt"`
+	Status    string                 `json:"status"`
+	Metrics   map[string]any         `json:"metrics"`
+}
+
+type ProjectEnvVar struct {
+	ID        string `json:"id,omitempty"`
+	Key       string `json:"key"`
+	Value     string `json:"value"`
+	IsSecret  bool   `json:"isSecret"`
+	CreatedAt string `json:"createdAt,omitempty"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
+}
+
+type ProjectEnvUpdateResult struct {
+	Success    bool `json:"success"`
+	Count      int  `json:"count"`
+	Redeployed int  `json:"redeployed"`
+}
+
+type BoxVolume struct {
+	ID            string `json:"id"`
+	ProjectID     string `json:"projectId"`
+	Name          string `json:"name"`
+	SizeGiB       int    `json:"sizeGib"`
+	Format        string `json:"format"`
+	Status        string `json:"status"`
+	AttachedBoxID string `json:"attachedBoxId"`
+	Target        string `json:"target"`
+	CreatedAt     string `json:"createdAt"`
+}
+
+type UnifiedVolume struct {
+	ID          string `json:"id"`
+	ProjectID   string `json:"projectId"`
+	ProjectName string `json:"projectName,omitempty"`
+	Name        string `json:"name"`
+	SizeGiB     int    `json:"sizeGib"`
+	Type        string `json:"type"` // "cell" or "box"
+	Status      string `json:"status"`
+	AttachedTo  string `json:"attachedTo,omitempty"`
+	Target      string `json:"target,omitempty"`
+}
+
+type BoxPortMapping struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"projectId"`
+	BoxID     string `json:"boxId"`
+	NicID     string `json:"nicId"`
+	Protocol  string `json:"protocol"`
+	BindIP    string `json:"bindIp"`
+	HostPort  int    `json:"hostPort"`
+	GuestPort int    `json:"guestPort"`
+	Status    string `json:"status"`
+}
+
+type BoxPortMappingInput struct {
+	BoxID     string `json:"boxId"`
+	NicID     string `json:"nicId"`
+	Protocol  string `json:"protocol"`
+	GuestPort int    `json:"guestPort"`
+}
+
+type BoxNic struct {
+	ID        string `json:"id"`
+	BoxID     string `json:"boxId"`
+	ProjectID string `json:"projectId"`
+	Name      string `json:"name,omitempty"`
+	IPv4      string `json:"ipv4"`
+	IsPrimary bool   `json:"isPrimary,omitempty"`
+}
+
 var stdin = bufio.NewReader(os.Stdin)
