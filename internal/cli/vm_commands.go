@@ -60,8 +60,23 @@ func runVMGroup(args []string) error {
 		return vmImagesFlow(rest)
 	case "create":
 		return vmCreateFlow(rest)
+	case "ports":
+		if len(rest) < 1 {
+			return errors.New("usage: hubfly vm ports <vmIdOrName>")
+		}
+		return vmPortsFlow(rest[0])
+	case "port-map":
+		if len(rest) < 2 {
+			return errors.New("usage: hubfly vm port-map <vmIdOrName> <guestPort> [--protocol tcp|udp]")
+		}
+		return vmPortMapFlow(rest[0], rest[1:])
+	case "port-unmap":
+		if len(rest) < 1 {
+			return errors.New("usage: hubfly vm port-unmap <mappingId>")
+		}
+		return vmPortUnmapFlow(rest[0])
 	default:
-		return fmt.Errorf("unknown vm command %q (available: list, inspect, start, stop, restart, force-stop, resize, delete, images, create)", command)
+		return fmt.Errorf("unknown vm command %q (available: list, inspect, start, stop, restart, force-stop, resize, delete, images, create, ports, port-map, port-unmap)", command)
 	}
 }
 
@@ -590,5 +605,156 @@ func vmCreateFlow(args []string) error {
 	fmt.Printf("ID:     %s\n", created.ID)
 	fmt.Printf("Name:   %s\n", created.Name)
 	fmt.Printf("Status: %s\n", created.Status)
+	return nil
+}
+
+func vmPortsFlow(boxIDOrName string) error {
+	token, err := ensureAuth(true)
+	if err != nil {
+		return err
+	}
+
+	box, projectID, err := findBox(token, boxIDOrName)
+	if err != nil {
+		return err
+	}
+
+	mappings, err := fetchBoxPortMappings(token, projectID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch port mappings: %w", err)
+	}
+
+	var boxMappings []BoxPortMapping
+	for _, m := range mappings {
+		if m.BoxID == box.ID {
+			boxMappings = append(boxMappings, m)
+		}
+	}
+
+	if len(boxMappings) == 0 {
+		fmt.Printf("No public port mappings configured for Box '%s'.\n", box.Name)
+		fmt.Printf("Run 'hubfly vm port-map %s <guestPort>' to map a port.\n", box.Name)
+		return nil
+	}
+
+	fmt.Printf("Port mappings for Box '%s' (%s):\n\n", box.Name, box.ID)
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "#\tPROTOCOL\tGUEST PORT\tHOST PORT\tBIND IP\tSTATUS\tMAPPING ID")
+	for i, m := range boxMappings {
+		_, _ = fmt.Fprintf(tw, "%d\t%s\t%d\t%d\t%s\t%s\t%s\n",
+			i+1,
+			strings.ToUpper(m.Protocol),
+			m.GuestPort,
+			m.HostPort,
+			m.BindIP,
+			m.Status,
+			m.ID,
+		)
+	}
+	return tw.Flush()
+}
+
+func vmPortMapFlow(boxIDOrName string, args []string) error {
+	token, err := ensureAuth(true)
+	if err != nil {
+		return err
+	}
+
+	box, projectID, err := findBox(token, boxIDOrName)
+	if err != nil {
+		return err
+	}
+
+	var guestPort int
+	protocol := "tcp"
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--protocol":
+			if i+1 >= len(args) {
+				return errors.New("--protocol requires 'tcp' or 'udp'")
+			}
+			protocol = strings.ToLower(args[i+1])
+			i++
+		default:
+			if guestPort == 0 {
+				p, err := strconv.Atoi(args[i])
+				if err != nil || p <= 0 || p > 65535 {
+					return fmt.Errorf("invalid guest port '%s' (expected 1-65535)", args[i])
+				}
+				guestPort = p
+			} else {
+				return fmt.Errorf("unexpected argument: %s", args[i])
+			}
+		}
+	}
+
+	if guestPort == 0 {
+		return errors.New("usage: hubfly vm port-map <vmIdOrName> <guestPort> [--protocol tcp|udp]")
+	}
+
+	// Fetch box primary NIC
+	nics, err := fetchBoxNics(token, projectID, box.ID)
+	if err != nil || len(nics) == 0 {
+		return fmt.Errorf("failed to resolve network interface for Box '%s': %w", box.Name, err)
+	}
+	primaryNic := nics[0]
+
+	fmt.Printf("Mapping %s port %d for Box '%s'...\n", strings.ToUpper(protocol), guestPort, box.Name)
+	created, err := createBoxPortMapping(token, projectID, BoxPortMappingInput{
+		BoxID:     box.ID,
+		NicID:     primaryNic.ID,
+		Protocol:  protocol,
+		GuestPort: guestPort,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create port mapping: %w", err)
+	}
+
+	fmt.Printf("Port mapped successfully!\n")
+	fmt.Printf("Host Port:  %d\n", created.HostPort)
+	fmt.Printf("Guest Port: %d (%s)\n", created.GuestPort, strings.ToUpper(created.Protocol))
+	fmt.Printf("Bind IP:    %s\n", created.BindIP)
+	fmt.Printf("Mapping ID: %s\n", created.ID)
+	return nil
+}
+
+func vmPortUnmapFlow(mappingID string) error {
+	token, err := ensureAuth(true)
+	if err != nil {
+		return err
+	}
+
+	allProjects, err := fetchAllProjectsAnyType(token, "")
+	if err != nil {
+		return err
+	}
+
+	foundProjectID := ""
+	for _, p := range allProjects {
+		mappings, err := fetchBoxPortMappings(token, p.ID)
+		if err == nil {
+			for _, m := range mappings {
+				if m.ID == mappingID {
+					foundProjectID = p.ID
+					break
+				}
+			}
+		}
+		if foundProjectID != "" {
+			break
+		}
+	}
+
+	if foundProjectID == "" {
+		return fmt.Errorf("port mapping '%s' not found in any project", mappingID)
+	}
+
+	fmt.Printf("Removing port mapping '%s'...\n", mappingID)
+	if err := deleteBoxPortMapping(token, foundProjectID, mappingID); err != nil {
+		return fmt.Errorf("failed to delete port mapping: %w", err)
+	}
+
+	fmt.Printf("Port mapping '%s' removed successfully.\n", mappingID)
 	return nil
 }
