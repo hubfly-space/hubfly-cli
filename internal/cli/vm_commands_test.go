@@ -78,6 +78,9 @@ func TestVMCommandRoutingValidation(t *testing.T) {
 		{name: "resize missing arg", args: []string{"vm", "resize"}, wantErr: "usage: hubfly vm resize"},
 		{name: "delete missing arg", args: []string{"vm", "delete"}, wantErr: "usage: hubfly vm delete"},
 		{name: "create missing name", args: []string{"vm", "create"}, wantErr: "usage: hubfly vm create"},
+		{name: "ports missing arg", args: []string{"vm", "ports"}, wantErr: "usage: hubfly vm ports"},
+		{name: "port-map missing args", args: []string{"vm", "port-map"}, wantErr: "usage: hubfly vm port-map"},
+		{name: "port-unmap missing arg", args: []string{"vm", "port-unmap"}, wantErr: "usage: hubfly vm port-unmap"},
 		{name: "unknown subcommand", args: []string{"vm", "unknown-cmd"}, wantErr: "unknown vm command"},
 	}
 
@@ -169,6 +172,42 @@ func TestVMAPIOperations(t *testing.T) {
 				"operationId": "boxop-123"
 			}`))
 
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/boxes/box-123/nics"):
+			_, _ = w.Write([]byte(`[
+				{"id": "nic-1", "boxId": "box-123", "name": "eth0", "isPrimary": true}
+			]`))
+
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/box-port-mappings"):
+			_, _ = w.Write([]byte(`[
+				{
+					"id": "map-1",
+					"boxId": "box-123",
+					"nicId": "nic-1",
+					"protocol": "tcp",
+					"guestPort": 80,
+					"hostPort": 32080,
+					"bindIp": "198.51.100.1"
+				}
+			]`))
+
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/box-port-mappings/create"):
+			var input BoxPortMappingInput
+			_ = json.NewDecoder(r.Body).Decode(&input)
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(BoxPortMapping{
+				ID:        "map-2",
+				BoxID:     input.BoxID,
+				NicID:     input.NicID,
+				Protocol:  input.Protocol,
+				GuestPort: input.GuestPort,
+				HostPort:  32022,
+				BindIP:    "198.51.100.1",
+			})
+
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/box-port-mappings/map-1/delete"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"success": true}`))
+
 		default:
 			http.NotFound(w, r)
 		}
@@ -232,5 +271,43 @@ func TestVMAPIOperations(t *testing.T) {
 	}
 	if created.ID != "box-999" || created.Name != "new-vm" {
 		t.Fatalf("unexpected created box: %+v", created)
+	}
+
+	// Test fetchBoxNics
+	nics, err := fetchBoxNics("test-token", "proj-1", "box-123")
+	if err != nil {
+		t.Fatalf("fetchBoxNics failed: %v", err)
+	}
+	if len(nics) != 1 || nics[0].ID != "nic-1" || !nics[0].IsPrimary {
+		t.Fatalf("unexpected nics: %+v", nics)
+	}
+
+	// Test fetchBoxPortMappings
+	mappings, err := fetchBoxPortMappings("test-token", "proj-1")
+	if err != nil {
+		t.Fatalf("fetchBoxPortMappings failed: %v", err)
+	}
+	if len(mappings) != 1 || mappings[0].GuestPort != 80 || mappings[0].HostPort != 32080 {
+		t.Fatalf("unexpected mappings: %+v", mappings)
+	}
+
+	// Test createBoxPortMapping
+	newMap, err := createBoxPortMapping("test-token", "proj-1", BoxPortMappingInput{
+		BoxID:     "box-123",
+		NicID:     "nic-1",
+		Protocol:  "tcp",
+		GuestPort: 22,
+	})
+	if err != nil {
+		t.Fatalf("createBoxPortMapping failed: %v", err)
+	}
+	if newMap.ID != "map-2" || newMap.GuestPort != 22 || newMap.HostPort != 32022 {
+		t.Fatalf("unexpected created mapping: %+v", newMap)
+	}
+
+	// Test deleteBoxPortMapping
+	err = deleteBoxPortMapping("test-token", "proj-1", "map-1")
+	if err != nil {
+		t.Fatalf("deleteBoxPortMapping failed: %v", err)
 	}
 }
