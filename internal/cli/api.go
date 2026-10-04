@@ -427,6 +427,289 @@ func removeProjectVolume(token, projectID, volumeID string) error {
 	)
 }
 
+func fetchContainerMetrics(token, projectID, containerID string) (*ContainerStatsSnapshot, error) {
+	var payload struct {
+		Latest ContainerStatsSnapshot `json:"latest"`
+		ContainerStatsSnapshot
+	}
+	err := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/containers/"+containerID+"/metrics",
+		token,
+		nil,
+		&payload,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if payload.Latest.CPUPercent > 0 || payload.Latest.MemoryUsageBytes > 0 || payload.Latest.Time != "" {
+		return &payload.Latest, nil
+	}
+	res := payload.ContainerStatsSnapshot
+	return &res, nil
+}
+
+func fetchBoxMetrics(token, projectID, boxID string) (*BoxMetrics, error) {
+	var payload BoxMetrics
+	err := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/boxes/"+boxID+"/metrics",
+		token,
+		nil,
+		&payload,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &payload, nil
+}
+
+func fetchProjectEnv(token, projectID string) ([]ProjectEnvVar, error) {
+	var payload []ProjectEnvVar
+	err := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/env",
+		token,
+		nil,
+		&payload,
+	)
+	if err != nil {
+		var wrapped struct {
+			EnvVars []ProjectEnvVar `json:"envVars"`
+			Items   []ProjectEnvVar `json:"items"`
+		}
+		if wrapErr := doJSONRequest(
+			http.MethodGet,
+			apiHost+"/api/v1/projects/"+projectID+"/env",
+			token,
+			nil,
+			&wrapped,
+		); wrapErr == nil {
+			if len(wrapped.EnvVars) > 0 {
+				return wrapped.EnvVars, nil
+			}
+			return wrapped.Items, nil
+		}
+		return nil, err
+	}
+	return payload, nil
+}
+
+func updateProjectEnv(token, projectID string, vars []ProjectEnvVar) (*ProjectEnvUpdateResult, error) {
+	type envItem struct {
+		Key      string `json:"key"`
+		Value    string `json:"value"`
+		IsSecret bool   `json:"isSecret"`
+	}
+	payloadList := make([]envItem, len(vars))
+	for i, v := range vars {
+		payloadList[i] = envItem{
+			Key:      v.Key,
+			Value:    v.Value,
+			IsSecret: v.IsSecret,
+		}
+	}
+	body := map[string]any{
+		"envVars": payloadList,
+	}
+	var res ProjectEnvUpdateResult
+	err := doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/env/update",
+		token,
+		body,
+		&res,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func fetchProjectBoxVolumes(token, projectID string) ([]BoxVolume, error) {
+	var payload []BoxVolume
+	err := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/box-volumes",
+		token,
+		nil,
+		&payload,
+	)
+	if err != nil {
+		var wrapped struct {
+			Volumes []BoxVolume `json:"volumes"`
+			Items   []BoxVolume `json:"items"`
+		}
+		if wrapErr := doJSONRequest(
+			http.MethodGet,
+			apiHost+"/api/v1/projects/"+projectID+"/box-volumes",
+			token,
+			nil,
+			&wrapped,
+		); wrapErr == nil {
+			if len(wrapped.Volumes) > 0 {
+				payload = wrapped.Volumes
+			} else {
+				payload = wrapped.Items
+			}
+		} else {
+			return nil, err
+		}
+	}
+	for i := range payload {
+		payload[i].ProjectID = projectID
+	}
+	return payload, nil
+}
+
+func createProjectBoxVolume(token, projectID string, name string, sizeGiB int) (*BoxVolume, error) {
+	body := map[string]any{
+		"name":    name,
+		"sizeGib": sizeGiB,
+	}
+	var payload struct {
+		BoxVolume
+		ID string `json:"id"`
+	}
+	err := doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/box-volumes/create",
+		token,
+		body,
+		&payload,
+	)
+	if err != nil {
+		return nil, err
+	}
+	res := payload.BoxVolume
+	if res.ID == "" {
+		res.ID = payload.ID
+	}
+	if res.Name == "" {
+		res.Name = name
+	}
+	if res.SizeGiB == 0 {
+		res.SizeGiB = sizeGiB
+	}
+	res.ProjectID = projectID
+	return &res, nil
+}
+
+func mutateProjectBoxVolume(token, projectID, volumeID, action string, extra map[string]any) error {
+	body := map[string]any{
+		"action": action,
+	}
+	for k, v := range extra {
+		body[k] = v
+	}
+	return doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/box-volumes/"+volumeID+"/mutate",
+		token,
+		body,
+		nil,
+	)
+}
+
+func fetchBoxPortMappings(token, projectID string) ([]BoxPortMapping, error) {
+	var payload []BoxPortMapping
+	err := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/box-port-mappings",
+		token,
+		nil,
+		&payload,
+	)
+	if err != nil {
+		var wrapped struct {
+			PortMappings []BoxPortMapping `json:"portMappings"`
+			Items        []BoxPortMapping `json:"items"`
+		}
+		if wrapErr := doJSONRequest(
+			http.MethodGet,
+			apiHost+"/api/v1/projects/"+projectID+"/box-port-mappings",
+			token,
+			nil,
+			&wrapped,
+		); wrapErr == nil {
+			if len(wrapped.PortMappings) > 0 {
+				payload = wrapped.PortMappings
+			} else {
+				payload = wrapped.Items
+			}
+		} else {
+			return nil, err
+		}
+	}
+	for i := range payload {
+		payload[i].ProjectID = projectID
+	}
+	return payload, nil
+}
+
+func createBoxPortMapping(token, projectID string, req BoxPortMappingInput) (*BoxPortMapping, error) {
+	var payload BoxPortMapping
+	err := doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/box-port-mappings/create",
+		token,
+		req,
+		&payload,
+	)
+	if err != nil {
+		return nil, err
+	}
+	payload.ProjectID = projectID
+	return &payload, nil
+}
+
+func deleteBoxPortMapping(token, projectID, mappingID string) error {
+	return doJSONRequest(
+		http.MethodPost,
+		apiHost+"/api/v1/projects/"+projectID+"/box-port-mappings/"+mappingID+"/delete",
+		token,
+		map[string]any{},
+		nil,
+	)
+}
+
+func fetchBoxNics(token, projectID, boxID string) ([]BoxNic, error) {
+	var payload []BoxNic
+	err := doJSONRequest(
+		http.MethodGet,
+		apiHost+"/api/v1/projects/"+projectID+"/boxes/"+boxID+"/nics",
+		token,
+		nil,
+		&payload,
+	)
+	if err != nil {
+		var wrapped struct {
+			Nics  []BoxNic `json:"nics"`
+			Items []BoxNic `json:"items"`
+		}
+		if wrapErr := doJSONRequest(
+			http.MethodGet,
+			apiHost+"/api/v1/projects/"+projectID+"/boxes/"+boxID+"/nics",
+			token,
+			nil,
+			&wrapped,
+		); wrapErr == nil {
+			if len(wrapped.Nics) > 0 {
+				payload = wrapped.Nics
+			} else {
+				payload = wrapped.Items
+			}
+		} else {
+			return nil, err
+		}
+	}
+	for i := range payload {
+		payload[i].BoxID = boxID
+		payload[i].ProjectID = projectID
+	}
+	return payload, nil
+}
+
 func createProjectForDeploy(token, name, regionID, orgID string) (project, error) {
 	var payload project
 	body := map[string]string{
