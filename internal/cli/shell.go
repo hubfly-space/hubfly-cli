@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"os/exec"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,24 +45,72 @@ type terminalServerMessage struct {
 	ProtocolVersion int    `json:"protocolVersion,omitempty"`
 }
 
-func sshFlow(containerIDOrName string) error {
+func sshFlow(targetIDOrName string) error {
 	token, err := ensureAuth(true)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Searching for container '%s'...\n", containerIDOrName)
-	targetContainer, targetProjectID, err := findContainer(token, containerIDOrName)
-	if err != nil {
-		return err
+	fmt.Printf("Searching for '%s'...\n", targetIDOrName)
+	targetContainer, targetProjectID, err := findContainer(token, targetIDOrName)
+	if err == nil && targetContainer != nil {
+		return sshContainerTerminal(
+			token,
+			targetProjectID,
+			targetContainer.ID,
+			targetIDOrName,
+		)
 	}
 
-	return sshContainerTerminal(
-		token,
-		targetProjectID,
-		targetContainer.ID,
-		containerIDOrName,
-	)
+	// Secondary check: Virtual machine (Box)
+	box, boxProjectID, bErr := findBox(token, targetIDOrName)
+	if bErr == nil && box != nil {
+		return sshBoxFlow(token, boxProjectID, box)
+	}
+
+	return fmt.Errorf("target '%s' not found as container or virtual machine", targetIDOrName)
+}
+
+func sshBoxFlow(token, projectID string, box *Box) error {
+	mappings, err := fetchBoxPortMappings(token, projectID)
+	var sshPortMapping *BoxPortMapping
+	if err == nil {
+		for _, m := range mappings {
+			if m.BoxID == box.ID && m.GuestPort == 22 && m.Protocol == "tcp" {
+				sshPortMapping = &m
+				break
+			}
+		}
+	}
+
+	if sshPortMapping != nil && sshPortMapping.HostPort > 0 {
+		host := sshPortMapping.BindIP
+		if host == "" || host == "0.0.0.0" {
+			u, _ := url.Parse(apiHost)
+			if u != nil && u.Hostname() != "" {
+				host = u.Hostname()
+			}
+		}
+		user := "root"
+		fmt.Printf("Connecting to Box '%s' via SSH on port %d (%s)...\n", box.Name, sshPortMapping.HostPort, host)
+		cmd := exec.Command("ssh", "-p", strconv.Itoa(sshPortMapping.HostPort), fmt.Sprintf("%s@%s", user, host))
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+
+	fmt.Printf("\nBox:    %s (%s)\n", box.Name, box.ID)
+	fmt.Printf("Status: %s\n", box.Status)
+	if box.PrivateIPv4 != nil && *box.PrivateIPv4 != "" {
+		fmt.Printf("Mesh IP: %s\n", *box.PrivateIPv4)
+	}
+	fmt.Println("\nNo public SSH port mapping found on port 22.")
+	fmt.Println("To connect to this Box via SSH:")
+	fmt.Printf("  1. Map a public SSH port:   hubfly vm port-map %s 22\n", box.Name)
+	fmt.Printf("  2. Or open a mesh tunnel:   hubfly tunnel %s 2222 22\n", box.Name)
+	fmt.Printf("     Then connect with:       ssh -p 2222 root@localhost\n")
+	return nil
 }
 
 func sshContainerTerminal(
