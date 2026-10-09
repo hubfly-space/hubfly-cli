@@ -252,10 +252,7 @@ func deployFlowWithOptions(opts deployOptions) error {
 		return err
 	}
 	if status.Build.Status != "success" {
-		if strings.TrimSpace(status.Build.Error) == "" {
-			return fmt.Errorf("deployment failed")
-		}
-		return fmt.Errorf("deployment failed: %s", status.Build.Error)
+		return fmt.Errorf("deployment failed: %s", deploySessionFailureMessage(status))
 	}
 
 	if strings.TrimSpace(status.Build.BoundContainerID) != "" {
