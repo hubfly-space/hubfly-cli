@@ -281,9 +281,9 @@ Deployment succeeded</pre>
                             Get the binary
                         </h2>
                         <p class="mt-4 leading-7 text-ink/70">
-                            The installer downloads the latest release for Linux
-                            or macOS and puts the binary on your path. Windows
-                            users can download release assets from GitHub.
+                            Install the latest release on Linux, macOS, or
+                            Windows. The Windows PowerShell installer verifies
+                            the release checksum and adds Hubfly to your path.
                         </p>
                     </div>
 
@@ -308,6 +308,28 @@ Deployment succeeded</pre>
                             <pre
                                 class="code-scroll overflow-x-auto rounded bg-[#1f2328] p-4 text-sm text-white"
                             ><code>curl -fsSL https://raw.githubusercontent.com/hubfly-space/hubfly-cli/main/install.sh | bash</code></pre>
+                        </div>
+
+                        <div
+                            class="rounded border border-line bg-paper p-4 shadow-sm"
+                        >
+                            <div
+                                class="mb-3 flex items-center justify-between gap-3"
+                            >
+                                <p class="text-sm font-semibold">
+                                    Windows / PowerShell
+                                </p>
+                                <button
+                                    type="button"
+                                    data-copy="irm https://raw.githubusercontent.com/hubfly-space/hubfly-cli/main/install.ps1 | iex"
+                                    class="copy rounded border border-soil/25 px-3 py-1.5 text-xs font-semibold text-soil"
+                                >
+                                    Copy
+                                </button>
+                            </div>
+                            <pre
+                                class="code-scroll overflow-x-auto rounded bg-[#1f2328] p-4 text-sm text-white"
+                            ><code>irm https://raw.githubusercontent.com/hubfly-space/hubfly-cli/main/install.ps1 | iex</code></pre>
                         </div>
 
                         <div class="grid gap-4 md:grid-cols-2">
