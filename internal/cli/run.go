@@ -189,7 +189,7 @@ func runDeployGroup(args []string) error {
 			if fetchErr != nil {
 				return fetchErr
 			}
-			fmt.Printf("%s\t%s\t%s\t%s\n", status.Build.ID, status.Build.Status, status.Build.Phase, status.Build.Error)
+			fmt.Printf("%s\t%s\t%s\t%s\n", status.Build.ID, status.Build.Status, status.Build.Phase, deploySessionErrorMessage(status))
 			return nil
 		case "events":
 			events, fetchErr := fetchDeploySessionEvents(token, args[1])
