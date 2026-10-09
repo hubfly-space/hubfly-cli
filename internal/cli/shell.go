@@ -122,7 +122,7 @@ func sshContainerTerminal(
 	}
 
 	cols, rows := 80, 24
-	if w, h, sizeErr := term.GetSize(int(os.Stdin.Fd())); sizeErr == nil && w > 0 && h > 0 {
+	if w, h, sizeErr := term.GetSize(int(os.Stdout.Fd())); sizeErr == nil && w > 0 && h > 0 {
 		cols, rows = w, h
 	}
 
@@ -150,6 +150,8 @@ func sshContainerTerminal(
 	}
 
 	isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
+	restoreOutput := prepareTerminalOutput()
+	defer restoreOutput()
 	var oldState *term.State
 	if isTerminal {
 		oldState, err = term.MakeRaw(int(os.Stdin.Fd()))
@@ -159,6 +161,7 @@ func sshContainerTerminal(
 		}
 	}
 	restoreTerminal := func() {
+		restoreOutput()
 		if isTerminal && oldState != nil {
 			_ = term.Restore(int(os.Stdin.Fd()), oldState)
 		}
