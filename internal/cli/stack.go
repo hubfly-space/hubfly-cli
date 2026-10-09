@@ -550,10 +550,7 @@ func deployBuiltStackService(
 		return stackServiceState{}, err
 	}
 	if status.Build.Status != "success" {
-		if status.Build.Error == "" {
-			return stackServiceState{}, fmt.Errorf("service %s deployment failed", service.Name)
-		}
-		return stackServiceState{}, fmt.Errorf("service %s deployment failed: %s", service.Name, status.Build.Error)
+		return stackServiceState{}, fmt.Errorf("service %s deployment failed: %s", service.Name, deploySessionFailureMessage(status))
 	}
 	containerID := strings.TrimSpace(status.Build.BoundContainerID)
 	if containerID == "" {

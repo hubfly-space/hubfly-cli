@@ -490,11 +490,6 @@ func vmImagesFlow(args []string) error {
 }
 
 func vmCreateFlow(args []string) error {
-	token, err := ensureAuth(true)
-	if err != nil {
-		return err
-	}
-
 	if len(args) < 1 {
 		return errors.New("usage: hubfly vm create <name> --image <imageId> [--vcpu <n>] [--ram <mb>] [--disk <gb>] [--project <id>]")
 	}
@@ -572,6 +567,11 @@ func vmCreateFlow(args []string) error {
 
 	if input.ImageID == "" {
 		return errors.New("missing required flag --image <imageId>. Run 'hubfly vm images' to view available images")
+	}
+
+	token, err := ensureAuth(true)
+	if err != nil {
+		return err
 	}
 
 	if input.ProjectID == "" {

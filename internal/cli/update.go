@@ -68,10 +68,6 @@ func updateFlow(checkOnly bool) error {
 		return err
 	}
 
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("auto-update on Windows is not supported yet; download manually: %s", assetURL)
-	}
-
 	fmt.Printf("Updating hubfly: %s -> %s\n", version.Version, latest)
 	exePath, err := os.Executable()
 	if err != nil {
@@ -86,7 +82,7 @@ func updateFlow(checkOnly bool) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(newBinary) }()
+	defer func() { _ = os.RemoveAll(filepath.Dir(newBinary)) }()
 
 	if err := replaceExecutable(exePath, newBinary); err != nil {
 		return err
@@ -195,6 +191,13 @@ func downloadAndExtractNamedBinary(assetURL string, binaryCandidates []string) (
 		return "", err
 	}
 
+	keepTemp := false
+	defer func() {
+		if !keepTemp {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
+
 	archivePath := filepath.Join(tmpDir, "archive")
 	f, err := os.Create(archivePath)
 	if err != nil {
@@ -211,6 +214,9 @@ func downloadAndExtractNamedBinary(assetURL string, binaryCandidates []string) (
 	outputName := "binary"
 	if len(binaryCandidates) > 0 {
 		outputName = binaryCandidates[0]
+	}
+	if runtime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(outputName), ".exe") {
+		outputName += ".exe"
 	}
 	binaryPath := filepath.Join(tmpDir, outputName)
 
@@ -232,6 +238,7 @@ func downloadAndExtractNamedBinary(assetURL string, binaryCandidates []string) (
 	if err := os.Chmod(binaryPath, 0o755); err != nil {
 		return "", err
 	}
+	keepTemp = true
 	return binaryPath, nil
 }
 
@@ -343,6 +350,10 @@ func replaceExecutable(currentPath, newBinaryPath string) error {
 	dir := filepath.Dir(currentPath)
 	stagedPath := filepath.Join(dir, ".hubfly.new")
 	backupPath := filepath.Join(dir, ".hubfly.old")
+	if runtime.GOOS == "windows" {
+		stagedPath += ".exe"
+		backupPath += ".exe"
+	}
 
 	in, err := os.Open(newBinaryPath)
 	if err != nil {
@@ -362,7 +373,12 @@ func replaceExecutable(currentPath, newBinaryPath string) error {
 		return err
 	}
 
-	_ = os.Remove(backupPath)
+	// Windows permits renaming the running executable, but keeps it locked until
+	// exit. A previous update's backup must be removable before replacing it.
+	if err := os.Remove(backupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(stagedPath)
+		return fmt.Errorf("cannot remove previous update backup: %w", err)
+	}
 	if err := os.Rename(currentPath, backupPath); err != nil {
 		_ = os.Remove(stagedPath)
 		return fmt.Errorf("cannot replace %s (try with proper permissions): %w", currentPath, err)
