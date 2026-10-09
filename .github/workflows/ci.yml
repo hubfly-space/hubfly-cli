@@ -1,0 +1,54 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.runner }}
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cli
+      - uses: actions/checkout@v4
+        with:
+          repository: hubfly-space/hubfly-builder
+          path: builder
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+      - name: Build the offline inspector
+        working-directory: builder
+        shell: bash
+        run: |
+          binary="$RUNNER_TEMP/hubfly-builder"
+          if [ "$RUNNER_OS" = "Windows" ]; then binary="${binary}.exe"; fi
+          go build -o "$binary" ./cmd/hubfly-builder
+          echo "HUBFLY_TEST_BUILDER=$binary" >> "$GITHUB_ENV"
+      - name: Test CLI and Builder interoperability
+        working-directory: cli
+        run: go test ./...
+      - name: Build CLI
+        working-directory: cli
+        run: go build -o hubfly.exe .
+      - name: Test PowerShell installation
+        if: runner.os == 'Windows'
+        working-directory: cli
+        shell: pwsh
+        run: ./scripts/test-install-windows.ps1 -BinaryPath ./hubfly.exe
+      - name: Cross-compile Windows ARM64
+        working-directory: cli
+        shell: bash
+        run: GOOS=windows GOARCH=arm64 go build -o "$RUNNER_TEMP/hubfly-arm64.exe" .
