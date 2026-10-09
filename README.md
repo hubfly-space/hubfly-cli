@@ -6,17 +6,87 @@ Repo: https://github.com/hubfly-space/hubfly-cli
 
 ## Quick install
 
-Linux/macOS:
+### Linux / macOS
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hubfly-space/hubfly-cli/main/install.sh | bash
 ```
 
-Then verify:
+Verify the installation:
 
 ```bash
 hubfly version
 ```
+
+### Windows (PowerShell)
+
+Open Windows PowerShell or PowerShell in Windows Terminal and run:
+
+```powershell
+irm https://raw.githubusercontent.com/hubfly-space/hubfly-cli/main/install.ps1 | iex
+hubfly version
+hubfly login
+```
+
+The installer automatically selects the Windows AMD64 (x64) or ARM64 release,
+verifies its SHA-256 checksum, and installs `hubfly.exe` to
+`%LOCALAPPDATA%\HubFly\bin`. It adds that directory to your user PATH and the
+current PowerShell session. The default installation does not require an
+administrator terminal. Reopen any other terminals to pick up the PATH change.
+
+For a custom installation directory, download and run the installer:
+
+```powershell
+$installer = Join-Path $env:TEMP 'hubfly-install.ps1'
+Invoke-WebRequest -UseBasicParsing `
+  -Uri 'https://raw.githubusercontent.com/hubfly-space/hubfly-cli/main/install.ps1' `
+  -OutFile $installer
+& $installer -InstallDir "$env:USERPROFILE\Tools\HubFly"
+```
+
+To install a specific published release, also pass `-Version <release-tag>`
+(replace `<release-tag>` with the desired tag from the
+[releases page](https://github.com/hubfly-space/hubfly-cli/releases)).
+
+If PowerShell blocks the downloaded script, run it with an execution-policy
+override for that process, then open a new terminal:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
+```
+
+If `hubfly` is not recognized after installation, check the binary directly:
+
+```powershell
+& "$env:LOCALAPPDATA\HubFly\bin\hubfly.exe" version
+```
+
+For a custom installation, use that directory instead. Confirm it is in your
+user PATH and reopen the terminal.
+
+### Manual Windows installation
+
+Download `hubfly_windows_amd64.zip` for x64 or `hubfly_windows_arm64.zip` for
+ARM64, plus its matching `.sha256` file, from the
+[releases page](https://github.com/hubfly-space/hubfly-cli/releases).
+In the download directory, verify and extract the archive (change `$asset` for
+ARM64):
+
+```powershell
+$asset = 'hubfly_windows_amd64.zip'
+$expected = ((Get-Content -Raw "$asset.sha256").Trim() -split '\s+')[0]
+$actual = (Get-FileHash -Algorithm SHA256 $asset).Hash
+if ($expected -notmatch '^[a-fA-F0-9]{64}$' -or $actual -ne $expected) {
+  throw 'Release archive checksum verification failed.'
+}
+$installDir = Join-Path $env:LOCALAPPDATA 'HubFly\bin'
+Expand-Archive -LiteralPath $asset -DestinationPath $installDir -Force
+& "$installDir\hubfly.exe" version
+```
+
+Add `$installDir` to your user PATH and open a new terminal to run `hubfly`
+from any directory. Docker with Linux containers enabled is required for local
+image builds; installation and remote management commands can run without it.
 
 ## Features
 
@@ -62,6 +132,27 @@ hubfly version
 hubfly update --check
 hubfly update
 hubfly service [--port <port>]
+```
+
+## Windows build and deploy
+
+Use PowerShell or Windows Terminal. Auth uses Windows Credential Manager when
+available; local configuration and the downloaded inspector live under
+`%USERPROFILE%\.hubfly`.
+
+`hubfly build validate`, `hubfly build explain`, and automatic build detection
+use the Windows `hubfly-builder.exe` offline inspector. It detects runtimes and
+generates Linux Dockerfiles. `hubfly deploy` and stack image builds require
+Docker with Linux containers enabled (for example, Docker Desktop). The
+regional Hubcell build server remains on Linux. Box SSH connections require
+`ssh.exe` on PATH.
+
+`hubfly update` replaces the CLI executable on Windows. Reopen the command to
+use the new version. Container terminal sessions support live window resizing.
+
+```powershell
+$env:HUBFLY_API_URL = 'http://127.0.0.1:3000'
+hubfly whoami
 ```
 
 ## API compatibility
@@ -301,11 +392,22 @@ It uses Tailwind through the CDN and can be shipped directly with GitHub Pages f
 
 ## Build from source
 
+Linux/macOS:
+
 ```bash
 git clone https://github.com/hubfly-space/hubfly-cli.git
 cd hubfly-cli
 go build -o hubfly .
 ./hubfly version
+```
+
+Windows (PowerShell, with Go installed):
+
+```powershell
+git clone https://github.com/hubfly-space/hubfly-cli.git
+cd hubfly-cli
+go build -o hubfly.exe .
+.\hubfly.exe version
 ```
 
 ## Release automation
