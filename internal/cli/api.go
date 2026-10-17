@@ -989,37 +989,79 @@ func doJSONRequestWithTimeout(method, url, token string, body any, out any, time
 	return json.Unmarshal(respBytes, out)
 }
 
+// debugSecretKeys are field names whose values never reach debug output.
+var debugSecretKeys = map[string]bool{
+	"token":           true,
+	"uploadtoken":     true,
+	"accesstoken":     true,
+	"refreshtoken":    true,
+	"connecttoken":    true,
+	"valueciphertext": true,
+	"secret":          true,
+	"password":        true,
+	"privatekey":      true,
+	"apikey":          true,
+	"authorization":   true,
+}
+
+func isDebugSecretKey(key string) bool {
+	lower := strings.ToLower(key)
+	if debugSecretKeys[lower] {
+		return true
+	}
+	return strings.HasSuffix(lower, "secret") || strings.HasSuffix(lower, "password") || strings.HasSuffix(lower, "token")
+}
+
+// isSecretEnvName reports environment variable names that hold credentials,
+// e.g. HUBFLY_REALTIME_SECRET, PUSHER_APP_SECRET or HUBFLY_REALTIME_E2E_KEYS.
+func isSecretEnvName(name string) bool {
+	upper := strings.ToUpper(name)
+	return strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASSWORD") ||
+		strings.Contains(upper, "TOKEN") || strings.Contains(upper, "PRIVATE") ||
+		strings.HasSuffix(upper, "E2E_KEYS") || strings.HasSuffix(upper, "E2E_KEY")
+}
+
 func redactJSONForDebug(payload []byte) string {
 	var value any
 	if json.Unmarshal(payload, &value) != nil {
 		return "<non-json payload omitted>"
 	}
-	var redact func(any, string) any
-	redact = func(item any, parentKey string) any {
+	var redact func(any) any
+	redact = func(item any) any {
 		switch typed := item.(type) {
 		case map[string]any:
+			// {key, value, isSecret|secret: true} items (env variables) and
+			// items naming a secret-bearing variable hide their value.
 			secret := typed["isSecret"] == true || typed["secret"] == true
+			if name, ok := typed["key"].(string); ok && isSecretEnvName(name) {
+				secret = true
+			}
 			result := make(map[string]any, len(typed))
 			for key, child := range typed {
 				lower := strings.ToLower(key)
-				if lower == "token" || lower == "uploadtoken" || lower == "accesstoken" || lower == "valueciphertext" || (secret && lower == "value") {
+				if secret && lower == "value" {
 					result[key] = "***"
 					continue
 				}
-				result[key] = redact(child, key)
+				// Boolean flags such as "secret": true carry no secret.
+				if _, isBool := child.(bool); !isBool && child != nil && isDebugSecretKey(key) {
+					result[key] = "***"
+					continue
+				}
+				result[key] = redact(child)
 			}
 			return result
 		case []any:
 			result := make([]any, len(typed))
 			for index, child := range typed {
-				result[index] = redact(child, parentKey)
+				result[index] = redact(child)
 			}
 			return result
 		default:
 			return item
 		}
 	}
-	redacted, err := json.Marshal(redact(value, ""))
+	redacted, err := json.Marshal(redact(value))
 	if err != nil {
 		return "<json payload omitted>"
 	}
