@@ -99,6 +99,7 @@ image builds; installation and remote management commands can run without it.
 - Local `hubfly deploy` flow with reusable `hubfly-builder`, `hubfly.build.json`, deploy diffs, and resumable image uploads
 - Build config helpers: `hubfly build init|validate|edit|explain`
 - Debug mode for API requests/responses (`--debug` or `HUBFLY_DEBUG=1`)
+- Managed Realtime servers, apps, keys, bindings, events, live inspector and E2E key generation (`realtime`, alias `rt`)
 - Built-in version and self-update commands
 - Tunnel service mode (`service`)
 - GitHub Pages documentation page in `index.html`
@@ -132,7 +133,95 @@ hubfly version
 hubfly update --check
 hubfly update
 hubfly service [--port <port>]
+hubfly realtime <list|info|create|delete|apps|keys|bind|env|publish|send|tail|insights|keygen> [options]
 ```
+
+## Managed Realtime
+
+`hubfly realtime` (alias `rt`) manages HubFly Managed Realtime: Pusher-compatible
+WebSocket servers with HubFly extensions and built-in end-to-end encryption.
+`<server>` is a realtime server id or name (add `--project <id|name>` when two
+projects use the same name). `<app>` is an app id or name; `--app` may be omitted
+when the server has one app. Every command that prints data accepts `--json`.
+
+```bash
+hubfly rt list [--project <id|name>]
+hubfly rt info chat
+hubfly rt create chat --size small --project new                  # quotes the monthly price and asks to confirm
+hubfly rt create chat --size small --project my-managed --yes      # scripts: --yes accepts the quoted price
+hubfly rt delete chat                                              # type the name to confirm, or --yes
+```
+
+`create` reads the sizes from the managed catalog, quotes the price from the
+pricing endpoint (`$x.xx/month`, billed hourly), asks for confirmation unless
+`--yes` is given, creates the server (in a new managed project with
+`--project new`; HubFly chooses the region of managed projects) and waits for the operation with a progress spinner. Pass
+`--no-wait` to return right away, `--cpu`/`--memory` for a custom size and
+`--app <name>` to name the first app (default `production`).
+
+Apps, keys and bindings:
+
+```bash
+hubfly rt apps chat
+hubfly rt apps create chat staging --origins https://app.example.com --encryption required
+hubfly rt apps update chat staging --client-events --history durable --history-ttl 1h
+hubfly rt apps delete chat staging
+hubfly rt keys list chat --app staging
+hubfly rt keys create chat --app staging          # prints the new secret once
+hubfly rt keys rotate chat --app staging --grace 24h
+hubfly rt keys revoke chat <keyId> --app staging
+hubfly rt keys reveal chat --app staging           # audited secret reveal
+hubfly rt bind chat --to web --preset laravel --client-prefix VITE_
+hubfly rt bind list chat
+hubfly rt bind remove chat <bindingId>             # removes the variables it wrote; --keep-variables keeps them
+hubfly rt env chat --app staging --format dotenv   # add --reveal to include the secret
+```
+
+App settings flags for `apps create`/`apps update`: `--origins <a,b>`,
+`--client-events[=false]`, `--subscription-count[=false]`, `--require-auth[=false]`,
+`--encryption off|optional|required`, `--history off|memory|durable`,
+`--history-ttl <duration>`, `--history-max <n>`, `--offline-queue[=false]`,
+`--max-connections <n>`, `--max-message-bytes <n>` and `--payload-preview[=false]`.
+
+Secrets are printed only by `keys create`, `keys reveal`, and by `--reveal` on
+`apps create`, `keys rotate` and `env`. `keys create` always prints the new
+secret, the one time it is shown (as in the web dialog): in text mode with a
+warning on stderr, with `--json` in the `secret` field. `keys rotate` shows how long the old key
+keeps working (the grace period). `--debug` never prints secrets or tokens.
+
+Events and debugging:
+
+```bash
+hubfly rt publish chat --channel orders --event order.updated --data '{"id":42}'
+echo '{"id":42}' | hubfly rt publish chat orders order.updated
+hubfly rt send chat --connection 1234567890.1234567890 --event notice --data hello
+hubfly rt send chat --user u_42 --event notice --data-file ./notice.json
+hubfly rt tail chat --family msg,conn --channel-prefix orders
+hubfly rt tail chat --json | jq .
+hubfly rt insights chat --window 6h
+```
+
+Event data is sent as text from `--data`, `--data-file <path|->` or stdin.
+End-to-end connection ids (`<socket_id>~<key>`) carry a client key that must
+never reach HubFly: the CLI removes the key before any request. Plaintext sends
+to such ids are refused; encrypt end-to-end direct messages on your own server
+with the HubFly server SDK (or pass `--strip-key` to send unencrypted plaintext
+to the socket id).
+
+`tail` opens the live inspector. It gets a short-lived inspector token from the
+Dashboard, connects to `wss://<host>/hubfly/v1/inspect` with the token's origin
+(the API origin when the token names none) as `Origin`, sends the token in the first frame, and reconnects with a new token
+when the session ends. It prints one line per event (`--json` for JSON lines)
+and notes sampling and dropped events on stderr. Press Ctrl-C to stop.
+
+End-to-end master keys are generated locally and never sent anywhere:
+
+```bash
+hubfly rt keygen --kid k2      # k2:<base64 of 32 random bytes>
+```
+
+Put the key first in `HUBFLY_REALTIME_E2E_KEYS` (comma-separated `kid:base64`
+entries; the first one encrypts) on your own servers.
 
 ## Windows build and deploy
 
@@ -303,7 +392,7 @@ When debug mode is enabled:
 Debug output includes:
 - HTTP method/URL
 - masked Authorization token
-- request/response payloads
+- request/response payloads (secrets, tokens and secret environment values are masked)
 - tunnel route selection details
 - backend error/request trace IDs when the API returns them
 
