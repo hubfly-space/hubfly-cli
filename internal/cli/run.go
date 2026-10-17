@@ -105,6 +105,8 @@ func run(args []string) error {
 		return runEnvGroup(args[1:])
 	case "volume", "volumes", "vol":
 		return runVolumeGroup(args[1:])
+	case "realtime", "rt":
+		return runRealtimeGroup(args[1:])
 	case "logs":
 		if len(args) < 2 {
 			return errors.New("usage: hubfly logs <containerIdOrName> [--follow|-f]")
@@ -333,6 +335,16 @@ func printUsage() {
 	fmt.Println("  hubfly volume detach <volumeIdOrName>")
 	fmt.Println("  hubfly volume resize <volumeIdOrName> --size <gb>")
 	fmt.Println("  hubfly volume delete <volumeIdOrName> [--yes|-y]")
+	fmt.Println("")
+	fmt.Println("Managed Realtime (alias: rt; details: hubfly realtime help):")
+	fmt.Println("  hubfly realtime list [--project <id|name>] [--json]")
+	fmt.Println("  hubfly realtime create <name> [--size <preset>] [--project <id|name|new>] [--yes]")
+	fmt.Println("  hubfly realtime info|delete <server>")
+	fmt.Println("  hubfly realtime apps|keys|bind|env <server> ...")
+	fmt.Println("  hubfly realtime publish|send <server> ...")
+	fmt.Println("  hubfly realtime tail <server> [--app <app>] [--family <list>] [--json]")
+	fmt.Println("  hubfly realtime insights <server> [--window <duration>]")
+	fmt.Println("  hubfly realtime keygen [--kid <kid>]")
 	fmt.Println("")
 	fmt.Println("Shortcuts:")
 	fmt.Println("  hubfly start <containerOrVmIdOrName>")
