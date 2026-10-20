@@ -410,13 +410,19 @@ func fetchManagedPriceEstimate(token string, size rtSize) (rtPrice, error) {
 	return payload, err
 }
 
-// createManagedProject creates a managed project for realtime servers. HubFly
-// places managed projects itself (the API ignores a requested region).
+// createManagedProject creates a managed project for realtime servers.
 func createManagedProject(token, name string) (project, error) {
+	return createManagedProjectFor(token, name, managedServiceRealtime)
+}
+
+// createManagedProjectFor creates a managed project placed for one service
+// ("database" or "realtime"). HubFly places managed projects itself (the API
+// ignores a requested region).
+func createManagedProjectFor(token, name, service string) (project, error) {
 	body := map[string]any{
 		"name":           name,
 		"type":           "managed",
-		"managedService": "realtime",
+		"managedService": service,
 	}
 	var payload project
 	err := doJSONRequest(http.MethodPost, apiHost+"/api/v1/projects/create", token, body, &payload)
