@@ -99,7 +99,9 @@ image builds; installation and remote management commands can run without it.
 - Local `hubfly deploy` flow with reusable `hubfly-builder`, `hubfly.build.json`, deploy diffs, and resumable image uploads
 - Build config helpers: `hubfly build init|validate|edit|explain`
 - Debug mode for API requests/responses (`--debug` or `HUBFLY_DEBUG=1`)
-- Managed Realtime servers, apps, keys, bindings, events, live inspector and E2E key generation (`realtime`, alias `rt`)
+- Managed Realtime servers, apps, keys, bindings, webhooks, events, live inspector and E2E key generation (`realtime`, alias `rt`)
+- Managed Databases (PostgreSQL, MySQL, SQLite/libSQL): create, connect, query, users, network, app bindings, export/import (`db`)
+- Object Storage: storage projects, buckets, object upload/download, S3 access keys, published assets and video encoding (`storage`)
 - Built-in version and self-update commands
 - Tunnel service mode (`service`)
 - GitHub Pages documentation page in `index.html`
@@ -133,7 +135,9 @@ hubfly version
 hubfly update --check
 hubfly update
 hubfly service [--port <port>]
-hubfly realtime <list|info|create|delete|apps|keys|bind|env|publish|send|tail|insights|keygen> [options]
+hubfly realtime <list|info|create|delete|start|stop|restart|resize|apps|keys|bind|env|publish|send|tail|webhooks|channels|history|insights|keygen|...> [options]
+hubfly db <list|engines|info|create|delete|start|stop|restart|resize|url|env|connect|shell|query|users|databases|network|bind|export|import|...> [options]
+hubfly storage <list|create|info|usage|buckets|ls|put|get|rm|url|keys|publish|share|encode|...> [options]
 ```
 
 ## Managed Realtime
@@ -222,6 +226,22 @@ hubfly rt keygen --kid k2      # k2:<base64 of 32 random bytes>
 
 Put the key first in `HUBFLY_REALTIME_E2E_KEYS` (comma-separated `kid:base64`
 entries; the first one encrypts) on your own servers.
+
+<!-- managed-lifecycle: realtime start/stop/restart/resize/upgrade/rename/protect/network (db-core work item) -->
+
+<!-- managed-observe: realtime logs/metrics/operations (db-data work item) -->
+
+<!-- realtime-extras: webhooks, channels, history, connections, disconnect, usage (realtime work item) -->
+
+## Managed Databases
+
+<!-- db-core: create, lifecycle, connect, credentials, shell, network, bind (db-core work item) -->
+
+<!-- db-data: query, databases, users, tokens, extensions, export/import, operate (db-data work item) -->
+
+## Object Storage
+
+<!-- storage: written by the storage work item -->
 
 ## Windows build and deploy
 
