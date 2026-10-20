@@ -40,6 +40,18 @@ const realtimeUsageText = `Managed Realtime (Pusher-compatible WebSockets with e
   hubfly realtime create [<name>] [--size <preset>|--cpu <n> --memory <mib>] [--storage <gib>]
                          [--project <id|name|new>] [--app <name>] [--yes] [--no-wait] [--json]
   hubfly realtime delete <server> [--yes] [--wait]
+  hubfly realtime start|stop|restart <server> [--no-wait] [--json]
+  hubfly realtime resize <server> [--size <preset>|--cpu <n> --memory <mib>] [--storage <gib>] [--yes] [--no-wait] [--json]
+  hubfly realtime upgrade <server> [--yes] [--no-wait]
+  hubfly realtime rename <server> <new-name>
+  hubfly realtime protect <server> on|off
+  hubfly realtime network <server> [--json]
+  hubfly realtime network allow <server> (<cidr>|--my-ip) [--label <text>]
+  hubfly realtime network remove <server> <cidr>
+                              (the allowlist guards the server HTTP API; WebSocket clients are never IP-restricted)
+  hubfly realtime logs <server> [--tail <bytes>] [--follow]
+  hubfly realtime metrics <server> [--window <duration>] [--json]
+  hubfly realtime operations <server> [--limit <n>] [--json]
   hubfly realtime apps [list] <server> [--json]
   hubfly realtime apps create <server> <name> [settings] [--reveal] [--json]
   hubfly realtime apps update <server> <app> [--name <name>] [--enable|--disable] [settings] [--json]
@@ -63,6 +75,20 @@ const realtimeUsageText = `Managed Realtime (Pusher-compatible WebSockets with e
   hubfly realtime tail <server> [--app <app>...] [--family conn,sub,member,msg,api,err,webhook]
                        [--channel-prefix <prefix>] [--preview] [--json]
   hubfly realtime insights <server> [--app <app>] [--window <duration>] [--json]
+  hubfly realtime webhooks [list] <server> [--app <app>] [--json]
+  hubfly realtime webhooks create <server> --url <https-url> --events <a,b> [--key <key>] [--disabled] [--app <app>] [--json]
+  hubfly realtime webhooks update <server> <webhook> [--url <url>] [--events <a,b>] [--key <key>] [--enable|--disable] [--app <app>] [--json]
+  hubfly realtime webhooks delete <server> <webhook> [--app <app>] [--yes]
+  hubfly realtime webhooks test <server> <webhook> [--app <app>] [--json]
+  hubfly realtime webhooks deliveries <server> [--webhook <webhook>] [--status <status>] [--limit <n>] [--app <app>] [--json]
+  hubfly realtime webhooks redeliver <server> <deliveryId> [--app <app>] [--json]
+  hubfly realtime channels <server> [--app <app>] [--prefix <prefix>] [--limit <n>] [--json]
+  hubfly realtime channels inspect <server> <channel> [--app <app>] [--members <n>] [--json]
+  hubfly realtime history <server> --channel <name> [--app <app>] [--limit <n>] [--json]
+  hubfly realtime history purge <server> [--channel <name>] [--app <app>] [--yes]
+  hubfly realtime connections <server> [--app <app>] [--user <id>] [--channel <name>] [--limit <n>] [--json]
+  hubfly realtime disconnect <server> (--connection <socketId>...|--user <id>) [--app <app>] [--yes]
+  hubfly realtime usage <server> [--app <app>] [--since <duration>] [--json]
   hubfly realtime keygen [--kid <kid>]
 
 App settings (apps create/update):
@@ -112,8 +138,14 @@ func runRealtimeGroup(args []string) error {
 		return realtimeInsightsFlow(rest)
 	case "keygen":
 		return realtimeKeygenFlow(rest)
+	case "start", "stop", "restart", "resize", "upgrade", "rename", "protect", "network":
+		return runManagedLifecycleCommand(managedServiceRealtime, command, rest)
+	case "logs", "metrics", "operations", "ops":
+		return runManagedObserveCommand(managedServiceRealtime, command, rest)
+	case "webhooks", "webhook", "hooks", "channels", "channel", "history", "connections", "disconnect", "usage":
+		return runRealtimeExtrasCommand(command, rest)
 	default:
-		return fmt.Errorf("unknown realtime command %q (available: list, info, create, delete, apps, keys, bind, env, publish, send, tail, insights, keygen)", command)
+		return fmt.Errorf("unknown realtime command %q (available: list, info, create, delete, start, stop, restart, resize, upgrade, rename, protect, network, logs, metrics, operations, apps, keys, bind, env, publish, send, tail, insights, webhooks, channels, history, connections, disconnect, usage, keygen)", command)
 	}
 }
 
@@ -272,66 +304,13 @@ func fetchManagedProjects(token, projectRef string) ([]project, error) {
 }
 
 // listRealtimeInstances returns the realtime servers of the managed projects
-// (or of one project). Projects the caller cannot read are skipped unless
-// one was named.
+// (or of one project).
 func listRealtimeInstances(token, projectRef string) ([]rtInstance, error) {
-	projects, err := fetchManagedProjects(token, projectRef)
-	if err != nil {
-		return nil, err
-	}
-	result := []rtInstance{}
-	for _, item := range projects {
-		instances, listErr := fetchManagedInstances(token, item.ID)
-		if listErr != nil {
-			if projectRef != "" {
-				return nil, listErr
-			}
-			debugf("skipping project %s: %v", item.ID, listErr)
-			continue
-		}
-		for _, instance := range instances {
-			if instance.Service != "realtime" {
-				continue
-			}
-			instance.ProjectID = item.ID
-			instance.ProjectName = item.Name
-			result = append(result, instance)
-		}
-	}
-	return result, nil
+	return listManagedInstancesOf(token, projectRef, managedServiceRealtime)
 }
 
 func resolveRealtimeInstance(token, ref, projectRef string) (rtInstance, error) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return rtInstance{}, errors.New("missing realtime server id or name")
-	}
-	instances, err := listRealtimeInstances(token, projectRef)
-	if err != nil {
-		return rtInstance{}, err
-	}
-	var byID, byName []rtInstance
-	for _, instance := range instances {
-		if instance.ID == ref {
-			byID = append(byID, instance)
-		} else if strings.EqualFold(instance.Name, ref) {
-			byName = append(byName, instance)
-		}
-	}
-	if len(byID) == 1 {
-		return byID[0], nil
-	}
-	if len(byName) == 1 {
-		return byName[0], nil
-	}
-	if len(byName) > 1 {
-		names := make([]string, 0, len(byName))
-		for _, instance := range byName {
-			names = append(names, fmt.Sprintf("%s in project '%s'", instance.ID, instance.ProjectName))
-		}
-		return rtInstance{}, fmt.Errorf("realtime server name '%s' is ambiguous (%s); use the id or --project", ref, strings.Join(names, ", "))
-	}
-	return rtInstance{}, fmt.Errorf("realtime server '%s' not found (list servers with: hubfly realtime list)", ref)
+	return resolveManagedInstanceOf(token, ref, projectRef, managedServiceRealtime)
 }
 
 func resolveRealtimeApp(token string, instance rtInstance, ref string) (rtApp, error) {
@@ -572,43 +551,10 @@ func realtimeOperationProgress(label string, operation rtOperation) string {
 // waitForRealtimeOperation polls an operation until it finishes. With
 // goneIsDone a 404 (the instance is gone) counts as success.
 func waitForRealtimeOperation(token string, instance rtInstance, operationID, label string, timeout time.Duration, quiet, goneIsDone bool) (rtOperation, error) {
-	spinner := newRealtimeSpinner(quiet)
-	defer spinner.stop()
-	deadline := time.Now().Add(timeout)
-	failures := 0
-	for {
-		operation, err := fetchManagedOperation(token, instance.ProjectID, instance.ID, operationID)
-		if err != nil {
-			var apiErr *apiError
-			if goneIsDone && errors.As(err, &apiErr) && apiErr.Status == 404 {
-				return rtOperation{ID: operationID, Status: "succeeded"}, nil
-			}
-			if errors.As(err, &apiErr) && apiErr.Status < 500 {
-				return rtOperation{}, err
-			}
-			failures++
-			if failures >= 5 {
-				return rtOperation{}, fmt.Errorf("lost track of operation %s: %w", operationID, err)
-			}
-		} else {
-			failures = 0
-			switch operation.Status {
-			case "succeeded":
-				return operation, nil
-			case "failed", "canceled":
-				message := operation.Status
-				if operation.Error != nil && strings.TrimSpace(operation.Error.Message) != "" {
-					message = operation.Error.Message
-				}
-				return operation, fmt.Errorf("operation %s %s: %s", operationID, operation.Status, message)
-			}
-			spinner.update(realtimeOperationProgress(label, operation), quiet)
-		}
-		if time.Now().After(deadline) {
-			return operation, fmt.Errorf("timed out after %s waiting for operation %s; it keeps running on HubFly (check with: hubfly realtime info %s)", timeout, operationID, instance.ID)
-		}
-		time.Sleep(rtPollInterval)
+	if instance.Service == "" {
+		instance.Service = managedServiceRealtime
 	}
+	return waitForManagedOperation(token, instance, operationID, label, timeout, quiet, goneIsDone)
 }
 
 // ---------------------------------------------------------------------------
