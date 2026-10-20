@@ -6,7 +6,7 @@
         <title>Hubfly CLI</title>
         <meta
             name="description"
-            content="Install, authenticate, deploy, tunnel, inspect, and automate Hubfly from the terminal."
+            content="Install, authenticate, deploy, tunnel, inspect, and automate Hubfly from the terminal, including managed databases, realtime servers, and object storage."
         />
         <link
             rel="icon"
@@ -471,6 +471,58 @@ hubfly logs api --follow</code></pre>
 hubfly service --port 5600
 hubfly update --check
 hubfly update</code></pre>
+                    </article>
+
+                    <article
+                        class="rounded border border-line bg-white p-5 shadow-sm"
+                    >
+                        <h3 class="font-semibold">Managed Databases</h3>
+                        <p class="mt-2 text-sm leading-6 text-ink/66">
+                            Create PostgreSQL, MySQL, or SQLite (libSQL)
+                            databases, connect to them, and write their
+                            connection string into an app project.
+                        </p>
+                        <pre
+                            class="mt-4 overflow-x-auto rounded bg-paper p-3 font-mono text-sm"
+                        ><code>hubfly db create app-db --engine postgresql
+hubfly db bind app-db --to web
+hubfly db connect app-db
+hubfly db query app-db "select now()"
+hubfly db export app-db --format sql</code></pre>
+                    </article>
+
+                    <article
+                        class="rounded border border-line bg-white p-5 shadow-sm"
+                    >
+                        <h3 class="font-semibold">Realtime</h3>
+                        <p class="mt-2 text-sm leading-6 text-ink/66">
+                            Run a Pusher-compatible WebSocket server, manage
+                            apps, keys, and webhooks, and watch live events.
+                        </p>
+                        <pre
+                            class="mt-4 overflow-x-auto rounded bg-paper p-3 font-mono text-sm"
+                        ><code>hubfly rt create chat --size small
+hubfly rt bind chat --to web
+hubfly rt publish chat --channel orders \
+  --event order.updated --data '{"id":42}'
+hubfly rt tail chat</code></pre>
+                    </article>
+
+                    <article
+                        class="rounded border border-line bg-white p-5 shadow-sm"
+                    >
+                        <h3 class="font-semibold">Object Storage</h3>
+                        <p class="mt-2 text-sm leading-6 text-ink/66">
+                            Create S3-compatible buckets, move files, and issue
+                            scoped access keys for your apps.
+                        </p>
+                        <pre
+                            class="mt-4 overflow-x-auto rounded bg-paper p-3 font-mono text-sm"
+                        ><code>hubfly storage create assets --region eu-1
+hubfly storage buckets create uploads
+hubfly storage put ./logo.png uploads/images/
+hubfly storage ls uploads
+hubfly storage keys create web --to web</code></pre>
                     </article>
                 </div>
             </section>
