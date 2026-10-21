@@ -52,3 +52,21 @@ jobs:
         working-directory: cli
         shell: bash
         run: GOOS=windows GOARCH=arm64 go build -o "$RUNNER_TEMP/hubfly-arm64.exe" .
+
+  dependency-submission:
+    name: Submit dependency graph
+    id: dependency-submission
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Submit Go dependency snapshot
+        uses: actions/go-dependency-submission@v2
+        with:
+          go-mod-path: go.mod
+          go-build-target: all
