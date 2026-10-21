@@ -1033,6 +1033,10 @@ func redactJSONForDebug(payload []byte) string {
 			// {key, value, isSecret|secret: true} items (env variables) and
 			// items naming a secret-bearing variable hide their value.
 			secret := typed["isSecret"] == true || typed["secret"] == true
+			// Managed credential responses use {kind, username, value}.
+			if kind, ok := typed["kind"].(string); ok && (strings.EqualFold(kind, "password") || strings.EqualFold(kind, "token")) {
+				secret = true
+			}
 			if name, ok := typed["key"].(string); ok && isSecretEnvName(name) {
 				secret = true
 			}
