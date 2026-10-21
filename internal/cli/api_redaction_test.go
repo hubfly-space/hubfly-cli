@@ -18,6 +18,21 @@ func TestRedactJSONForDebugHidesTokensAndSecretValues(t *testing.T) {
 	}
 }
 
+func TestRedactJSONForDebugHidesManagedCredentialValues(t *testing.T) {
+	payload := []byte(`{"credentials":[{"kind":"password","username":"admin","value":"admin-secret"},{"kind":"token","value":"libsql-secret"}],"setting":{"kind":"text","value":"visible-setting"}}`)
+	redacted := redactJSONForDebug(payload)
+	for _, secret := range []string{"admin-secret", "libsql-secret"} {
+		if strings.Contains(redacted, secret) {
+			t.Fatalf("debug output leaked %q: %s", secret, redacted)
+		}
+	}
+	for _, visible := range []string{"admin", "visible-setting"} {
+		if !strings.Contains(redacted, visible) {
+			t.Fatalf("debug output lost non-secret %q: %s", visible, redacted)
+		}
+	}
+}
+
 func TestRedactJSONForDebugHidesRealtimeSecrets(t *testing.T) {
 	payload := []byte(`{"ok":true,"data":{
 		"app":{"appId":"1000001","keys":[{"id":"rk_1","key":"publickey0123456789a","secretHint":"…wxyz","secretFingerprint":"fp-visible"}]},
