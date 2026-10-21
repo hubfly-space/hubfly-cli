@@ -87,8 +87,8 @@ const realtimeUsageText = `Managed Realtime (Pusher-compatible WebSockets with e
   hubfly realtime history <server> --channel <name> [--app <app>] [--limit <n>] [--json]
   hubfly realtime history purge <server> [--channel <name>] [--app <app>] [--yes]
   hubfly realtime connections <server> [--app <app>] [--user <id>] [--channel <name>] [--limit <n>] [--json]
-  hubfly realtime disconnect <server> (--connection <socketId>...|--user <id>) [--app <app>] [--yes]
-  hubfly realtime usage <server> [--app <app>] [--since <duration>] [--json]
+  hubfly realtime disconnect <server> (--connection <socketId>...|--user <id>) [--app <app>] [--mode terminate|disconnect] [--yes]
+  hubfly realtime usage <server> [--app <app>] [--since <duration|YYYY-MM-DD>] [--json]
   hubfly realtime keygen [--kid <kid>]
 
 App settings (apps create/update):
