@@ -13,6 +13,8 @@ coverage
 # Editor / OS
 .idea
 .DS_Store
+__pycache__/
+*.pyc
 
 # Local runtime output
 logs

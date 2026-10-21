@@ -59,13 +59,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      SNAPSHOT_CORRELATOR: cli-dependency-snapshot
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
       - name: Submit Go dependency snapshot
-        uses: actions/go-dependency-submission@v2
-        with:
-          go-mod-path: go.mod
-          go-build-target: all
+        run: python3 scripts/submit-dependency-snapshot.py "$RUNNER_TEMP/snapshot.json"
