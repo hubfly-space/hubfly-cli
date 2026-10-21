@@ -55,7 +55,6 @@ jobs:
 
   dependency-submission:
     name: Submit dependency graph
-    id: dependency-submission
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
