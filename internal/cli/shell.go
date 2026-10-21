@@ -120,7 +120,14 @@ func sshContainerTerminal(
 	if err != nil {
 		return fmt.Errorf("failed to create terminal session: %w", err)
 	}
+	return runTerminalSession(session, displayName)
+}
 
+// runTerminalSession attaches the local terminal to a Dashboard terminal
+// session (container terminals and managed database shells share the
+// protocol). When the remote shell exits, the CLI exits with its exit code.
+func runTerminalSession(session terminalSession, label string) error {
+	debugf("opening terminal session %s for %s", session.SessionID, label)
 	cols, rows := 80, 24
 	if w, h, sizeErr := term.GetSize(int(os.Stdout.Fd())); sizeErr == nil && w > 0 && h > 0 {
 		cols, rows = w, h
