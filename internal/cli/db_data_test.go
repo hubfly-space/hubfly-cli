@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -620,8 +621,11 @@ func TestDBCert(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ca.pem")
 	mustRun(t, "db", "cert", "my", "--output", path)
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o644 {
+	if err != nil {
 		t.Fatalf("cert file: %v %v", info, err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o644 {
+		t.Fatalf("cert file mode = %v, want 0644", info.Mode().Perm())
 	}
 	if !strings.Contains(env.errOut.String(), "--ssl-mode=VERIFY_IDENTITY") {
 		t.Fatalf("mysql hint:\n%s", env.errOut.String())
