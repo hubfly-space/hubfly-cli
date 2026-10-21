@@ -227,21 +227,346 @@ hubfly rt keygen --kid k2      # k2:<base64 of 32 random bytes>
 Put the key first in `HUBFLY_REALTIME_E2E_KEYS` (comma-separated `kid:base64`
 entries; the first one encrypts) on your own servers.
 
-<!-- managed-lifecycle: realtime start/stop/restart/resize/upgrade/rename/protect/network (db-core work item) -->
+Manage the server lifecycle and API allowlist:
 
-<!-- managed-observe: realtime logs/metrics/operations (db-data work item) -->
+```bash
+hubfly rt stop chat
+hubfly rt start chat
+hubfly rt restart chat
+hubfly rt resize chat --size small --yes
+hubfly rt upgrade chat --yes
+hubfly rt rename chat team-chat
+hubfly rt protect team-chat on
+hubfly rt network allow team-chat --my-ip --label office
+hubfly rt network remove team-chat 203.0.113.10/32
+```
 
-<!-- realtime-extras: webhooks, channels, history, connections, disconnect, usage (realtime work item) -->
+Commands wait for the operation unless you pass `--no-wait`. Restarts use an
+in-place handoff that preserves connections; resize applies live. Upgrades and
+stops drain clients. The network allowlist guards the server HTTP API;
+WebSocket clients are never IP-restricted. Realtime servers always have public
+access. Use `--json` for structured lifecycle output and `--timeout` to limit
+how long to wait.
+
+Logs, metrics and operations (the same commands work for `hubfly db`):
+
+```bash
+hubfly rt logs chat                    # last 64 KB of the server's stdout and stderr
+hubfly rt logs chat --tail 512k --follow   # polls every 2 s and prints new lines; Ctrl-C stops
+hubfly rt metrics chat --window 6h     # CPU, memory, storage, network, connections, channels, messages
+hubfly rt operations chat --limit 10   # create, restart, resize, upgrade, ... with status and errors
+```
+
+`--tail` takes bytes (`65536`, `64k`, `1m`; 4 KB to 2 MB). `--window` takes 5m to 7d.
+`metrics` and `operations` accept `--json`.
+
+Webhooks:
+
+```bash
+hubfly rt webhooks chat                            # ID, URL (host and path), EVENTS, ENABLED, KEY
+hubfly rt webhooks create chat --url https://example.com/hooks/realtime --events channel_occupied,member_added
+hubfly rt webhooks create chat --url https://example.com/hooks/realtime --events client_event --key <keyId> --disabled
+hubfly rt webhooks update chat <webhookId> --events channel_occupied,channel_vacated --enable
+hubfly rt webhooks test chat <webhookId>           # sends a signed hubfly.test event and shows the response
+hubfly rt webhooks deliveries chat --status failed --limit 20
+hubfly rt webhooks redeliver chat <deliveryId>
+hubfly rt webhooks delete chat <webhookId>         # asks to confirm, or --yes
+```
+
+Webhook URLs must use `https://` on a public host (port 443 or 8443).
+`--events` is checked against the event names in the managed catalog
+(`channel_occupied`, `channel_vacated`, `member_added`, `member_removed`,
+`client_event`, `cache_miss`, `subscription_count` and the `hubfly.*`
+connection, presence and delivery events). `update` sends only the flags you
+give. Tables show a webhook URL without its query string; `--json` prints the
+URL as stored.
+
+Deliveries are batched POSTs signed with the secret of the webhook's key
+(`--key`, an app key id or public key; by default the app's newest active key):
+`X-Pusher-Key` and `X-Pusher-Signature` (HMAC-SHA256 hex of the body, so the
+`webhook()` validators of Pusher server libraries work), plus
+`X-HubFly-Delivery-Id` (dedupe on it: delivery is at least once) and
+`X-HubFly-Signature: t=<unix seconds>,v1=<HMAC-SHA256 hex of "<t>.<body>">`
+(reject old `t` values to stop replays). Failed deliveries are retried with
+backoff for up to 24 hours, then marked `dead`; the delivery log keeps 7 days
+and any delivery can be queued again with `redeliver`. `test` is not written to
+the delivery log; it exits non-zero when the receiver does not answer 2xx.
+
+Live state, history and usage:
+
+```bash
+hubfly rt channels chat --prefix presence-          # occupied channels: NAME, TYPE, SUBSCRIBERS, USERS
+hubfly rt channels inspect chat presence-room --members 50
+hubfly rt history chat --channel orders --limit 20  # OFFSET, AT, EVENT, SIZE, DATA
+hubfly rt history purge chat --channel orders       # without --channel: every channel of the app
+hubfly rt connections chat --user u_42              # SOCKET ID, APP, USER, CHANNELS, PROTOCOL, LIBRARY, CONNECTED
+hubfly rt disconnect chat --connection 1234567890.1234567890
+hubfly rt disconnect chat --connection 1234567890.1234567890 --mode disconnect
+hubfly rt disconnect chat --user u_42               # every connection and session of the user
+hubfly rt usage chat --since 7d                     # or --since 2026-10-01; default: the last 30 days
+```
+
+`history` reads the messages the app retains (`--history memory|durable` on
+the app). Messages of `private-encrypted-` channels and `hubfly.e2e` envelopes
+stay opaque: HubFly cannot read them, so the table shows them as end-to-end
+encrypted (decrypt them on your own server with the HubFly server SDK).
+`connections` lists every app of the server; its `--user` and `--channel`
+filters need an app when the server has several (`--app`).
+
+`disconnect` uses `--mode terminate` by default: the connection closes with
+code 4009, the client does not reconnect and its session is discarded.
+`--mode disconnect` closes with code 4200: the client reconnects at once and
+HubFly SDK clients resume their session. `--user` always terminates. Like
+`send`, `disconnect` strips the client key from end-to-end connection ids
+(`<socket_id>~<key>`) before any request, and `connections` never prints one.
+`history purge`, `disconnect` and `webhooks delete` ask for confirmation; pass
+`--yes` in scripts.
+
+`usage` prints daily totals per app (UTC days, kept 400 days): peak
+connections, connection minutes, messages in and out, bytes in and out and
+webhook deliveries.
 
 ## Managed Databases
 
-<!-- db-core: create, lifecycle, connect, credentials, shell, network, bind (db-core work item) -->
+`hubfly db` (aliases `database` and `databases`) manages PostgreSQL, MySQL and
+SQLite/libSQL instances. Use an instance id or name, with `--project` when names
+are ambiguous. HubFly chooses the region. Run `hubfly db engines` for the
+available engine versions, size presets and current prices.
 
-<!-- db-data: query, databases, users, tokens, extensions, export/import, operate (db-data work item) -->
+```bash
+hubfly db engines
+hubfly db create app-db --engine postgresql --size nano --storage 10 --project new
+hubfly db list
+hubfly db info app-db --json
+hubfly db url app-db                       # password hidden
+hubfly db env app-db --reveal               # treat the output as a secret
+hubfly db credentials app-db --reveal
+hubfly db credentials rotate app-db --yes
+hubfly db connect app-db -- --version       # local psql or mysql client
+hubfly db shell app-db                     # remote console, no local client needed
+hubfly db bind app-db --to web --new-user --access read_write
+hubfly db bind list app-db
+hubfly db bind remove app-db <bindingId> --yes
+```
+
+Creation shows a price quote and asks for confirmation; scripts must pass
+`--yes`. Pick an existing managed project with `--project <id|name>`, or create
+one with `--project new [--project-name <name>]`. MySQL defaults to the smallest
+preset with at least 1 GiB of RAM. The default database is `app` (override with
+`--database` for PostgreSQL/MySQL); the admin username is fixed to `admin`.
+`--no-wait` returns when creation is accepted; `--timeout` limits the wait.
+
+Credentials stay hidden unless you use `--reveal` or create/rotate them.
+`connect` passes passwords through the client's environment, and any client
+arguments follow `--`. libSQL uses its HTTPS-compatible URL and an auth token;
+use a libSQL SDK or `hubfly db query` instead of a PostgreSQL/MySQL client.
+Bindings write `DATABASE_URL`, or `LIBSQL_URL` and `LIBSQL_AUTH_TOKEN`, into a
+Cell project's environment. Deploy the app to pick up the new values.
+`--new-user` creates a dedicated PostgreSQL/MySQL user for the binding.
+
+```bash
+hubfly db stop app-db
+hubfly db start app-db
+hubfly db restart app-db
+hubfly db resize app-db --size small --storage 20 --restart --yes
+hubfly db upgrade app-db --yes
+hubfly db rename app-db orders-db
+hubfly db protect orders-db on
+hubfly db network orders-db
+hubfly db network allow orders-db --my-ip --label office
+hubfly db network remove orders-db 203.0.113.10/32
+hubfly db network public orders-db off --yes
+hubfly db protect orders-db off
+hubfly db delete orders-db --yes --wait
+```
+
+Storage can only grow. Resize shows the old and new prices; some changes need a
+restart (`--restart` applies it now). Stopped instances pay for storage only.
+Deletion requires the instance name or `--yes`, and protection must be off.
+Public access is on by default; `--allow` or `--allow-my-ip` at creation sets an
+IP allowlist. `--private`, or disabling public access later, removes the public
+endpoint, including access by bound apps that use that hostname. TLS is always
+required when connecting to a public endpoint.
+
+Run SQL:
+
+```bash
+hubfly db query mydb "SELECT id, email FROM users LIMIT 5"
+hubfly db query mydb --file ./report.sql --format csv > report.csv
+cat migrate.sql | hubfly db query mydb --write
+hubfly db query mydb "SELECT * FROM orders" --database shop --max-rows 2000 --format json
+```
+
+Queries run read-only unless you pass `--write`; a read-only run that tries to
+change data fails and says so. The SQL comes from the argument, `--file <path|->`
+or stdin (up to 100 KB; use `hubfly db import` for larger scripts). Each statement
+prints a table (`NULL` for null values) or its command tag; results are capped at
+`--max-rows` (default 500, at most 5000) and `--timeout` (default 30s, at most 60s).
+`--format csv` prints a single result set. Notices and errors (code, position, hint)
+go to stderr, and the command exits non-zero when a statement fails.
+
+Logical databases, users and access (PostgreSQL and MySQL):
+
+```bash
+hubfly db databases mydb                           # default and system databases are marked
+hubfly db databases create mydb shop --owner app_user
+hubfly db databases delete mydb shop --force       # asks you to type the name; --force disconnects sessions first
+hubfly db users mydb
+hubfly db users create mydb reporter --preset read_only --databases shop
+hubfly db users update mydb reporter --preset read_write --all-databases
+hubfly db users rotate mydb reporter
+hubfly db users delete mydb reporter --reassign-to admin
+```
+
+Presets: `read_only`, `read_write` (the default; can also run migrations) and
+`admin` (all databases; never a superuser). `users create` and `users rotate`
+print the password once (with `--json`, in `password`). The primary admin user
+cannot be deleted; rotate its password with `hubfly db credentials rotate`.
+
+Access tokens (SQLite/libSQL) and extensions (PostgreSQL):
+
+```bash
+hubfly db tokens create mylite ci --access read_only --expires 30   # prints the token once
+hubfly db tokens mylite
+hubfly db tokens revoke mylite <tokenId>
+hubfly db extensions mydb --database shop
+hubfly db extensions install mydb pgcrypto --database shop
+hubfly db extensions remove mydb pgcrypto --cascade
+```
+
+New tokens have full access unless you pass `--access read_only`. libSQL cannot
+revoke a single token: `tokens revoke` rotates the signing key, which invalidates
+every token of the instance (apps connected with `hubfly db bind` get a new token).
+
+Export and import:
+
+```bash
+hubfly db export mydb --database shop               # waits, then downloads to the current directory
+hubfly db export mydb --format sql --output shop.sql
+hubfly db export mydb --no-wait                     # prints the export id
+hubfly db exports mydb
+hubfly db exports download mydb <exportId> --output shop.dump
+hubfly db import mydb ./shop.dump --database shop
+```
+
+PostgreSQL exports default to the `native` format (`pg_dump -Fc`); `--format sql`
+gives plain SQL. MySQL and libSQL export gzip-compressed SQL. Exports are kept for
+7 days, and the CLI never overwrites an existing file. `import` asks for
+confirmation, uploads the file (up to 5 GB) and runs it against the existing data;
+it stops at the first error. The format comes from the file name: `.dump` and
+`.backup` are PostgreSQL native dumps, `.sql` and `.sql.gz` are SQL; pass
+`--format` for other names. There are no automatic backups yet, so export before
+risky changes.
+
+Certificates, sessions, query insights and configuration:
+
+```bash
+hubfly db cert mydb --output mydb-ca.pem   # CA for sslmode=verify-full / --ssl-mode=VERIFY_IDENTITY
+hubfly db sessions mydb
+hubfly db sessions cancel mydb <sessionId>       # cancels the running query
+hubfly db sessions terminate mydb <sessionId>    # closes the connection
+hubfly db insights mydb --order-by mean_time --limit 10
+hubfly db insights reset mydb
+hubfly db config mydb                      # --all for every setting
+hubfly db config set mydb work_mem=16MB max_connections=200 --restart later --note "more memory"
+hubfly db config set mydb work_mem=        # back to the default
+hubfly db config history mydb
+hubfly db config revert mydb 3
+hubfly db logs mydb --follow
+hubfly db metrics mydb --window 24h
+hubfly db operations mydb
+```
+
+`config set` validates the change, shows the diff and which settings need a
+restart, and asks before applying. With `--restart later` (the default) those
+settings wait for the next `hubfly db restart`; `--restart now` restarts the
+database right away. Sessions opened by HubFly (console, monitoring) are marked
+and cannot be cancelled. `logs` needs the database operate permission. Engine
+features are checked first: tokens are libSQL-only, extensions PostgreSQL-only,
+and libSQL has no users, sessions, insights or configuration.
 
 ## Object Storage
 
-<!-- storage: written by the storage work item -->
+`hubfly storage` manages HubFly Object Storage: S3-compatible buckets, objects,
+scoped access keys, published assets and video encoding. Storage projects are
+regional: you pick a region that offers Object Storage when you create one.
+`<project>` is a Storage project id or name; `--project` may be omitted when you
+have exactly one Storage project, or set `HUBFLY_STORAGE_PROJECT`. Object paths
+are `<bucket>/<key>`. Commands that print data accept `--json`.
+
+```bash
+hubfly storage list
+hubfly storage create media --region <id|name>     # asks to confirm unless --yes, then waits until ready
+hubfly storage info media                            # S3 endpoint, state, usage, buckets
+hubfly storage usage media                           # used/quota, egress and encoding per day (30 days)
+hubfly storage delete media                          # type the name to confirm, or --yes
+```
+
+Deleting a Storage project revokes its access keys at once; its buckets and
+objects are removed after the region's recovery window.
+
+Buckets and objects:
+
+```bash
+hubfly storage buckets create photos --versioning enabled
+hubfly storage buckets update photos --versioning suspended --image-retention 30d
+hubfly storage buckets delete photos                 # only empty buckets
+hubfly storage ls                                    # buckets
+hubfly storage ls photos/2026/                       # "directories" (PRE) and objects
+hubfly storage ls photos --recursive --limit 0       # every key
+hubfly storage put ./cat.jpg photos/                 # key photos/cat.jpg
+hubfly storage put ./site photos/www --recursive     # site/a/b.html -> www/a/b.html
+hubfly storage get photos/cat.jpg ./cat.jpg          # --force overwrites; "-" writes to stdout
+hubfly storage rm photos/old/ --recursive            # lists, counts and asks to confirm (or --yes)
+hubfly storage url photos/cat.jpg                    # temporary download link (15 minutes)
+```
+
+`put` streams each file to a short-lived signed upload URL. The content type
+comes from `--content-type`, then the file extension, then the file's first
+bytes. One upload is limited to 20 GB; for larger files use an S3 client with
+multipart upload and a key from `keys create`. Versioning can be enabled or
+suspended but not turned off again; image retention (`keep` or 1h to 365d)
+controls how long generated image variants are cached.
+
+S3 access keys:
+
+```bash
+hubfly storage keys
+hubfly storage keys create backend                         # read/write on every bucket
+hubfly storage keys create cdn --read-only --bucket photos --format dotenv
+hubfly storage keys create backend --to web                # writes the variables into Cell project "web"
+hubfly storage keys revoke <accessKey>
+```
+
+The secret is printed once, when the key is created (with a warning on
+stderr). `--format dotenv|json` and `--to` use `HUBFLY_STORAGE_ENDPOINT`,
+`HUBFLY_STORAGE_REGION`, `HUBFLY_STORAGE_ACCESS_KEY_ID`,
+`HUBFLY_STORAGE_SECRET_ACCESS_KEY`, `HUBFLY_STORAGE_BUCKET` (bucket-scoped keys
+only) and the AWS SDK names `AWS_ENDPOINT_URL_S3`, `AWS_REGION`,
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`. `--to` stores the secrets as
+secret variables, prints only the variable names, reloads the project's
+containers, and revokes the new key again if the variables cannot be written.
+HubFly Storage accepts any SigV4 signing region (the CLI uses `us-east-1`); use
+path-style addressing. `--debug` never prints secrets.
+
+Assets and video:
+
+```bash
+hubfly storage publish photos/cat.jpg                # public asset; prints page and file URLs
+hubfly storage publish photos/report.pdf --protected # prints the asset access key
+hubfly storage share photos/clip.mp4 --expires 2h    # temporary link (5m to 24h)
+hubfly storage assets --bucket photos
+hubfly storage unpublish photos/cat.jpg              # deletes the asset AND the object
+hubfly storage encode photos/clip.mp4 --max-height 1080 --wait
+hubfly storage media                                 # encoding jobs
+```
+
+A published asset's page URL shows a viewer; add `/media` for the file itself.
+Protected assets need `?key=<access key>` (or the `X-Asset-Key` header) or a
+`share` link. `unpublish` removes the asset together with its source object,
+renditions and image variants, so download the object first if you want to keep
+it. `encode` produces HLS renditions up to the chosen height (default 720);
+`--wait` follows the job and prints a signed player URL.
 
 ## Windows build and deploy
 
