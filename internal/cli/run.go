@@ -373,7 +373,7 @@ func printUsage() {
 	fmt.Println("  hubfly start <containerOrVmIdOrName>")
 	fmt.Println("  hubfly stop <containerOrVmIdOrName>")
 	fmt.Println("  hubfly restart <containerOrVmIdOrName>")
-	fmt.Println("  hubfly ssh <containerOrVmIdOrName> [-- <cmd> [args...]]")
+	fmt.Println("  hubfly ssh <containerOrVmIdOrName> [-- <cmd> [args...]]   (Ctrl+] to detach)")
 	fmt.Println("  hubfly exec <containerIdOrName> -- <cmd> [args...]")
 	fmt.Println("  hubfly logs <containerIdOrName> [--follow|-f]")
 	fmt.Println("  hubfly tunnel <containerIdOrName> <localPort> <targetPort>")
