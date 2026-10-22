@@ -760,6 +760,8 @@ hubfly stack exec api -- printenv
 hubfly stack ssh api
 ```
 
+In an interactive `hubfly ssh`, `stack ssh`, or database shell session, press `Ctrl+]` to detach and return to your local shell without sending `exit` to the remote shell.
+
 ## Stack Deploys
 
 `hubfly stack` reads a local Compose-style file, builds any `build:` services on the user machine, pushes them through the authenticated regional registry upload flow, and creates or updates each service as a normal Hubfly container.

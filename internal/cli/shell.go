@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,10 @@ import (
 const (
 	terminalDialTimeout  = 10 * time.Second
 	terminalPingInterval = 25 * time.Second
+
+	// terminalDetachByte (Ctrl+]) leaves an interactive session locally
+	// without sending anything to the remote shell.
+	terminalDetachByte = 0x1d
 )
 
 type terminalClientMessage struct {
@@ -126,6 +131,8 @@ func sshContainerTerminal(
 // runTerminalSession attaches the local terminal to a Dashboard terminal
 // session (container terminals and managed database shells share the
 // protocol). When the remote shell exits, the CLI exits with its exit code.
+// On an interactive terminal, Ctrl+] detaches: the websocket is closed and the
+// CLI returns without sending exit/EOF to the remote shell.
 func runTerminalSession(session terminalSession, label string) error {
 	debugf("opening terminal session %s for %s", session.SessionID, label)
 	cols, rows := 80, 24
@@ -165,6 +172,8 @@ func runTerminalSession(session terminalSession, label string) error {
 		if err != nil {
 			debugf("failed to enter raw terminal mode: %v", err)
 			isTerminal = false
+		} else {
+			fmt.Fprintf(os.Stderr, "Connected to %s. Press Ctrl+] to detach.\r\n", label)
 		}
 	}
 	restoreTerminal := func() {
@@ -187,6 +196,11 @@ func runTerminalSession(session terminalSession, label string) error {
 
 	var authenticated atomic.Bool
 	var stdinStarted atomic.Bool
+	var detached atomic.Bool
+	onDetach := func() {
+		detached.Store(true)
+		shutdown()
+	}
 
 	go watchResize(conn, &authenticated, done)
 	go sendTerminalPings(conn, &authenticated, done)
@@ -195,12 +209,17 @@ func runTerminalSession(session terminalSession, label string) error {
 		if !stdinStarted.CompareAndSwap(false, true) {
 			return
 		}
-		go pumpStdin(conn, done)
+		go pumpStdin(conn, done, isTerminal, onDetach)
 	}
 
 	for {
 		var raw []byte
 		if err := websocket.Message.Receive(conn, &raw); err != nil {
+			if detached.Load() {
+				restoreTerminal()
+				fmt.Fprintf(os.Stderr, "\r\nDetached from %s.\r\n", label)
+				return nil
+			}
 			if errors.Is(err, io.EOF) {
 				return errors.New("terminal connection closed unexpectedly")
 			}
@@ -244,15 +263,35 @@ func sendTerminalMessage(conn *websocket.Conn, msg terminalClientMessage) error 
 	return websocket.Message.Send(conn, payload)
 }
 
-func pumpStdin(conn *websocket.Conn, done <-chan struct{}) {
+// splitAtDetach returns the bytes to forward before a detach key, and whether
+// one was seen. Anything after the detach key is dropped.
+func splitAtDetach(b []byte) ([]byte, bool) {
+	if i := bytes.IndexByte(b, terminalDetachByte); i >= 0 {
+		return b[:i], true
+	}
+	return b, false
+}
+
+func pumpStdin(conn *websocket.Conn, done <-chan struct{}, detachEnabled bool, onDetach func()) {
 	buf := make([]byte, 4096)
 	for {
 		n, readErr := os.Stdin.Read(buf)
 		if n > 0 {
-			if sendErr := sendTerminalMessage(conn, terminalClientMessage{
-				Type: "input",
-				Data: string(buf[:n]),
-			}); sendErr != nil {
+			data, detach := buf[:n], false
+			if detachEnabled {
+				data, detach = splitAtDetach(data)
+			}
+			if len(data) > 0 {
+				if sendErr := sendTerminalMessage(conn, terminalClientMessage{
+					Type: "input",
+					Data: string(data),
+				}); sendErr != nil {
+					return
+				}
+			}
+			if detach {
+				// Local-only: close the session without sending exit/EOF upstream.
+				onDetach()
 				return
 			}
 		}
