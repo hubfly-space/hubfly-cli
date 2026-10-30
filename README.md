@@ -100,8 +100,10 @@ image builds; installation and remote management commands can run without it.
 - Build config helpers: `hubfly build init|validate|edit|explain`
 - Debug mode for API requests/responses (`--debug` or `HUBFLY_DEBUG=1`)
 - Managed Realtime servers, apps, keys, bindings, webhooks, events, live inspector and E2E key generation (`realtime`, alias `rt`)
+- Managed Streams: stream servers, inputs and keys, channels, restream destinations, mixers and scenes, playlists, schedules, recordings and clips, playback keys, webhooks, live control, the studio socket, publishing with a local ffmpeg and playback (`stream`, alias `live`)
 - Managed Databases (PostgreSQL, MySQL, SQLite/libSQL): create, connect, query, users, network, app bindings, export/import (`db`)
 - Object Storage: storage projects, buckets, object upload/download, S3 access keys, published assets and video encoding (`storage`)
+- Web Analytics: sites for external websites or HubFly domains, install snippets, stats, realtime visitors, exports, usage and ingest keys (`analytics`)
 - Built-in version and self-update commands
 - Tunnel service mode (`service`)
 - GitHub Pages documentation page in `index.html`
@@ -136,8 +138,10 @@ hubfly update --check
 hubfly update
 hubfly service [--port <port>]
 hubfly realtime <list|info|create|delete|start|stop|restart|resize|apps|keys|bind|env|publish|send|tail|webhooks|channels|history|insights|keygen|...> [options]
+hubfly stream <list|info|create|delete|speed|start|stop|settings|live|usage|inputs|channels|destinations|mixers|scene|playlists|schedules|recordings|clips|playback-keys|webhooks|control|tail|push|play|...> [options]
 hubfly db <list|engines|info|create|delete|start|stop|restart|resize|url|env|connect|shell|query|users|databases|network|bind|export|import|...> [options]
 hubfly storage <list|create|info|usage|buckets|ls|put|get|rm|url|keys|publish|share|encode|...> [options]
+hubfly analytics <sites|verify|snippet|stats|realtime|export|usage|keys> [options]
 ```
 
 ## Managed Realtime
@@ -325,6 +329,121 @@ HubFly SDK clients resume their session. `--user` always terminates. Like
 `usage` prints daily totals per app (UTC days, kept 400 days): peak
 connections, connection minutes, messages in and out, bytes in and out and
 webhook deliveries.
+
+## Managed Streams
+
+`hubfly stream` (alias `live`) manages HubFly Managed Streams: live video and
+audio servers that take RTMP(S), SRT, WHIP, Icecast or pulled sources, mix and
+transcode them, restream them to other platforms and play them back over
+LL-HLS, WebRTC (WHEP) and audio streams. `<server>` is a stream server id or
+name (add `--project <id|name>` when two projects use the same name); inputs,
+channels and the other resources take an id or a name. Every command accepts
+`--json`. `hubfly stream help` prints the whole command tree and
+`hubfly stream <resource> help` every flag of a resource.
+
+Servers are priced by **speed** (the Mbps cap, billed per hour while the
+server runs, with the owner's first 25 Mbps free), plus processing and
+bandwidth by use. `create` and `speed` show the quote and ask to confirm
+(`--yes` skips the question; scripts must pass it).
+
+```bash
+hubfly stream create "Acme TV" --speed 100 --timezone Africa/Kigali   # prints the first stream key once, with OBS settings
+hubfly stream list
+hubfly stream info acme-tv
+hubfly stream speed acme-tv 250 --yes       # applies live; publishers and viewers stay connected
+hubfly stream stop acme-tv                  # no speed charge while stopped; players show the offline card
+hubfly stream start acme-tv
+hubfly stream live acme-tv                  # inputs, channels, destinations and mixers right now
+hubfly stream usage acme-tv --month 2026-10 # speed, processing and bandwidth, free allowance, month estimate
+hubfly stream settings acme-tv --offline-slate <graphic> --origins https://acme.example
+hubfly stream delete acme-tv                # type the name to confirm, or --yes
+```
+
+Inputs, channels and destinations:
+
+```bash
+hubfly stream inputs create acme-tv Camera --protocols rtmps,srt --backup-key   # keys print once
+hubfly stream inputs get acme-tv Camera          # connection details per protocol, keys masked
+hubfly stream inputs keys reveal acme-tv Camera  # stream admin only
+hubfly stream inputs keys rotate acme-tv Camera --role primary --yes
+hubfly stream channels create acme-tv Main --source input:Camera --latency low --dvr 60
+hubfly stream channels update acme-tv Main --access token --no-webrtc
+hubfly stream channels playback acme-tv Main     # HLS, WHEP, embed, thumbnail and audio URLs, embed code
+hubfly stream channels token acme-tv Main --ttl 1h   # a test viewer token
+printf '%s\n' "$YOUTUBE_KEY" | hubfly stream destinations create acme-tv YouTube --platform youtube --source channel:Main --stream-key-stdin
+hubfly stream destinations start acme-tv YouTube
+```
+
+Secrets never come from arguments: destination keys and SRT passphrases are
+read from stdin (`--stream-key-stdin`, `--srt-passphrase-stdin`). Output masks
+stream keys, tokens, webhook secrets and URL credentials unless you run a
+`reveal`; new keys and secrets (input keys, playback key and webhook secrets)
+print once when they are created or rotated. Platform presets fill the
+destination URL; `custom` and `linkedin` need `--url`.
+
+Mixers, playlists, schedules, recordings and the rest take flags for common
+fields and `--file <spec.json|->` for the full Dashboard API body (camelCase,
+flags win over the file):
+
+```bash
+hubfly stream mixers create acme-tv Show --preset 1080p30
+hubfly stream mixers update acme-tv Show --file show.json
+hubfly stream scene switch acme-tv Show Interview --fade 500ms
+hubfly stream playlists create acme-tv Loop --item asset:<link>:<assetId> --item https://cdn.example/intro.m3u8 --loop
+hubfly stream schedules create acme-tv "Evening news" --start 2026-11-02T18:00 --duration 60 --rrule "FREQ=WEEKLY;BYDAY=MO,WE,FR" \
+  --on-start '{"op":"channel.start","channel":"sch_…"}'
+hubfly stream schedules preview acme-tv --start 2026-11-02T18:00 --duration 60 --rrule "FREQ=DAILY"
+hubfly stream recordings acme-tv --channel Main
+hubfly stream clips create acme-tv --channel Main --from -90s --to -0s --name "Goal"
+hubfly stream playback-keys create acme-tv web       # the signing secret prints once
+hubfly stream webhooks create acme-tv --url https://acme.example/hooks/stream --events channel.live,input.connected
+hubfly stream graphics upload acme-tv lower-third.html
+hubfly stream storage-links create acme-tv --storage-project media --bucket recordings --mode read_write
+hubfly stream domains create acme-tv live.acme.example   # prints the CNAME to add, then: domains verify
+hubfly stream bindings create acme-tv --to web --playback-key web --channel Main --client-prefix NEXT_PUBLIC_
+```
+
+Live control and the studio socket:
+
+```bash
+hubfly stream control acme-tv --go-live Main --destination-start YouTube --record-start Main
+hubfly stream control acme-tv --slate Main=on
+hubfly stream control acme-tv --op '{"op":"playlist.next","channel":"sch_…"}'
+hubfly stream tail acme-tv                 # events and live state changes; Ctrl-C stops
+hubfly stream tail acme-tv --meters        # plus audio levels (every input and channel, at most 16)
+hubfly stream tail acme-tv --watch in:Camera,mx:Show --json
+```
+
+`control` sends every op in one request and fails (exit code 5) when any op
+fails. `tail` gets a short-lived studio token from the Dashboard, connects to
+`wss://<host>/v1/studio` and sends the token in the first frame (never in the
+URL); it reconnects with a new token after network errors and stops with an
+error when the server refuses the session.
+
+Publishing and playback:
+
+```bash
+hubfly stream push acme-tv show.mp4 --loop                 # SRT by default; the key comes from reveal
+hubfly stream push acme-tv show.mp4 --protocol rtmps --input Camera
+hubfly stream push acme-tv device                          # webcam: v4l2 (Linux), avfoundation (macOS)
+hubfly stream push acme-tv 'device:video=Integrated Camera' # DirectShow on Windows
+printf '%s\n' "$KEY" | hubfly stream push acme-tv show.mp4 --key-stdin   # without stream admin
+hubfly stream push acme-tv show.mp4 --dry-run              # prints the ffmpeg command line
+hubfly stream play acme-tv Main                            # mpv or ffplay, with a test token if needed
+hubfly stream play acme-tv Main --url-only
+```
+
+`push` runs a local `ffmpeg` (it tells you how to install it when missing)
+with the recommended low-latency settings: H.264 without B-frames, 2 s
+keyframes, CBR at `--bitrate` (4,500 kbps by default), AAC 160 kbps 48 kHz.
+The stream key never reaches ffmpeg: ffmpeg encodes to its standard output
+(MPEG-TS for SRT, FLV for RTMPS) and the CLI itself carries the stream to the
+server (SRT with the `publish:<key>` stream id and the input's passphrase, or
+RTMPS with a built-in publisher). So the key is not in any process listing,
+environment, temporary file or log. `play` opens the channel's HLS URL; for
+token channels it asks the Dashboard for a test token (`--ttl`, at most 24 h)
+signed with the newest playback key, which then appears in the player's
+command line.
 
 ## Managed Databases
 
@@ -567,6 +686,52 @@ Protected assets need `?key=<access key>` (or the `X-Asset-Key` header) or a
 renditions and image variants, so download the object first if you want to keep
 it. `encode` produces HLS renditions up to the chosen height (default 720);
 `--wait` follows the job and prints a signed player URL.
+
+## Web Analytics
+
+`hubfly analytics` manages HubFly Web Analytics: cookieless website analytics
+billed per event. A site lives in a Cell or Box project (for a domain the
+project serves on HubFly) or in a standalone Analytics project (for a website
+hosted anywhere). `<site>` is a site id, public id (`hfa_…`), name or domain,
+and may be omitted when you have exactly one site; `--project` narrows the
+search.
+
+```bash
+hubfly analytics sites                                  # every site, with its state and last event
+hubfly analytics verify example.com --project stats     # prints the TXT record to add, then reports "verified"
+hubfly analytics sites create example.com --project new --region <id|name>   # standalone Analytics project
+hubfly analytics sites create docs.example.com --domain www.docs.example.com --retention 90 --project stats
+hubfly analytics sites enable --domain app.example.com  # a domain your Cell project serves: HubFly injects the script
+hubfly analytics snippet docs.example.com              # the <script> tag for every page's <head>
+hubfly analytics sites status docs.example.com         # has an event arrived yet?
+hubfly analytics sites pause|resume|delete <site>      # delete asks to confirm unless --yes
+```
+
+A website hosted elsewhere must be covered by a verified custom domain of
+yours (`hubfly analytics verify`; a verified `example.com` covers its
+subdomains). `sites enable` finds the Cell or Box project that serves the
+hostname and turns on script injection (`--no-inject` to add the snippet
+yourself).
+
+```bash
+hubfly analytics stats docs.example.com                          # last 30 days, top pages and sources
+hubfly analytics stats docs --period 7d --compare                # change against the previous 7 days
+hubfly analytics stats docs --from 2026-10-01 --to 2026-10-28 --by country --limit 20
+hubfly analytics stats docs --filter country=DE --filter page!=/admin --by page --json
+hubfly analytics realtime docs --watch                           # visitors now; refreshes every 10 s
+hubfly analytics export docs --from 2026-10-01 --to 2026-10-07 --kind sessions --format ndjson -o sessions.ndjson
+hubfly analytics usage stats                                     # events this month, free allowance, cost
+hubfly analytics keys create docs backend                        # ingest key for the server-side events API, shown once
+hubfly analytics keys revoke docs backend --yes
+```
+
+`--filter` takes `<dimension>=<value>` (`*` globs), `<dimension>!=<value>` or
+`<dimension>~<text>`; dimensions are those of the analytics API (`page`,
+`source`, `country`, `device`, `utm_campaign`, `event`, …). Dates are in the
+site's time zone. Filtered reports read raw events, which are kept for the
+site's retention (30 to 365 days). An export returns at most 8 MB per call;
+split longer ranges. Goals, funnels, segments and shared dashboards are
+managed in the Dashboard or with the SDK (`client.analytics`).
 
 ## Windows build and deploy
 
