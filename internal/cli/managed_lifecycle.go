@@ -10,9 +10,10 @@ import (
 	"time"
 )
 
-// Lifecycle commands shared by `hubfly db` and `hubfly realtime`: start, stop,
-// restart, resize, upgrade, rename, protect and network. service is
-// managedServiceDatabase or managedServiceRealtime.
+// Lifecycle commands shared by `hubfly db`, `hubfly realtime` and `hubfly
+// stream`: start, stop, restart, resize, upgrade, rename, protect and network
+// (streams use start, stop, rename and protect). service is
+// managedServiceDatabase, managedServiceRealtime or managedServiceStream.
 
 func runManagedLifecycleCommand(service, command string, args []string) error {
 	switch command {
@@ -105,6 +106,9 @@ func managedAPIError(group managedGroup, name string, err error) error {
 		if group.Service == managedServiceRealtime {
 			return realtimeAPIError(err)
 		}
+		if group.Service == managedServiceStream {
+			return streamAPIError(err)
+		}
 		return err
 	}
 	return fmt.Errorf("%w\n%s", err, hint)
@@ -164,7 +168,9 @@ func managedPowerFlow(service, command string, args []string) error {
 	}
 	switch command {
 	case "stop":
-		if service == managedServiceRealtime {
+		if service == managedServiceStream {
+			_, _ = fmt.Fprintf(rtErr, "Stopping '%s' disconnects every publisher and viewer and ends live destinations and recordings; players show the offline card. A stopped stream server pays nothing for speed.\n", instance.Name)
+		} else if service == managedServiceRealtime {
 			_, _ = fmt.Fprintf(rtErr, "Stopping '%s' drains every client; the server is unavailable until you start it again. A stopped server pays for storage only.\n", instance.Name)
 		} else {
 			_, _ = fmt.Fprintf(rtErr, "Stopping '%s' disconnects every client; apps that use it fail until you start it again. A stopped database pays for storage only.\n", instance.Name)
