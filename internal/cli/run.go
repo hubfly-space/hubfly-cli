@@ -105,12 +105,16 @@ func run(args []string) error {
 		return runEnvGroup(args[1:])
 	case "volume", "volumes", "vol":
 		return runVolumeGroup(args[1:])
+	case "stream", "live":
+		return runStreamGroup(args[1:])
 	case "realtime", "rt":
 		return runRealtimeGroup(args[1:])
 	case "db", "database", "databases":
 		return runDBGroup(args[1:])
 	case "storage":
 		return runStorageGroup(args[1:])
+	case "analytics":
+		return runAnalyticsGroup(args[1:])
 	case "logs":
 		if len(args) < 2 {
 			return errors.New("usage: hubfly logs <containerIdOrName> [--follow|-f]")
@@ -360,6 +364,16 @@ func printUsage() {
 	fmt.Println("  hubfly realtime channels|history|connections|insights <server> ...")
 	fmt.Println("  hubfly realtime keygen [--kid <kid>]")
 	fmt.Println("")
+	fmt.Println("Managed Streams (alias: live; details: hubfly stream help):")
+	fmt.Println("  hubfly stream list [--project <id|name>] [--json]")
+	fmt.Println("  hubfly stream create <name> [--speed <mbps>] [--project <id|name|new>] [--yes]")
+	fmt.Println("  hubfly stream info|speed|start|stop|settings|live|usage|delete <server>")
+	fmt.Println("  hubfly stream inputs|channels|destinations|mixers|playlists|schedules <server> ...")
+	fmt.Println("  hubfly stream recordings|clips|playback-keys|webhooks|graphics|domains|bindings <server> ...")
+	fmt.Println("  hubfly stream control|scene <server> ...")
+	fmt.Println("  hubfly stream tail <server> [--meters] [--json]")
+	fmt.Println("  hubfly stream push <server> <file|device> | play <server> <channel>")
+	fmt.Println("")
 	fmt.Println("Object Storage (S3-compatible; details: hubfly storage help):")
 	fmt.Println("  hubfly storage list|create|info|usage [<project>]")
 	fmt.Println("  hubfly storage buckets [list|create|update|delete] ...")
@@ -368,6 +382,13 @@ func printUsage() {
 	fmt.Println("  hubfly storage url <bucket>/<key>")
 	fmt.Println("  hubfly storage keys [list|create|revoke] ...")
 	fmt.Println("  hubfly storage publish|share|encode <bucket>/<key>")
+	fmt.Println("")
+	fmt.Println("Web Analytics (cookieless; details: hubfly analytics help):")
+	fmt.Println("  hubfly analytics sites [list|create <domain>|enable --domain <host>|info|status|pause|resume|delete] ...")
+	fmt.Println("  hubfly analytics verify <domain> | snippet <site>")
+	fmt.Println("  hubfly analytics stats <site> [--period 30d] [--by <dimension>]")
+	fmt.Println("  hubfly analytics realtime <site> [--watch] | export <site> --from <date> --to <date>")
+	fmt.Println("  hubfly analytics usage [<project>] | keys [list|create|revoke] <site>")
 	fmt.Println("")
 	fmt.Println("Shortcuts:")
 	fmt.Println("  hubfly start <containerOrVmIdOrName>")
