@@ -21,6 +21,9 @@ type apiError struct {
 	Message   string
 	RequestID string
 	ErrorID   string
+	// Details is the error's "details" value when the API sends one (for
+	// example STREAM_INVALID's [{path, code, message}] list).
+	Details any
 }
 
 func (e *apiError) Error() string {
