@@ -920,6 +920,7 @@ func doJSONRequestWithTimeout(method, url, token string, body any, out any, time
 		code := ""
 		requestID := ""
 		errorID := ""
+		var details any
 		if len(respBytes) > 0 {
 			var apiPayload struct {
 				Error   any    `json:"error"`
@@ -942,6 +943,7 @@ func doJSONRequestWithTimeout(method, url, token string, body any, out any, time
 					if value, ok := errorObject["errorId"].(string); ok {
 						errorID = strings.TrimSpace(value)
 					}
+					details = errorObject["details"]
 				} else if strings.TrimSpace(apiPayload.Message) != "" {
 					msg = strings.TrimSpace(apiPayload.Message)
 				}
@@ -956,6 +958,7 @@ func doJSONRequestWithTimeout(method, url, token string, body any, out any, time
 			Message:   msg,
 			RequestID: requestID,
 			ErrorID:   errorID,
+			Details:   details,
 		}
 	}
 
@@ -1002,6 +1005,13 @@ var debugSecretKeys = map[string]bool{
 	"privatekey":      true,
 	"apikey":          true,
 	"authorization":   true,
+	// Managed Streams: input keys ({primary, backup}), destination keys and
+	// SRT passphrases.
+	"primary":       true,
+	"backup":        true,
+	"streamkey":     true,
+	"srtpassphrase": true,
+	"passphrase":    true,
 }
 
 func isDebugSecretKey(key string) bool {
@@ -1061,6 +1071,8 @@ func redactJSONForDebug(payload []byte) string {
 				result[index] = redact(child)
 			}
 			return result
+		case string:
+			return redactStreamSecretText(typed)
 		default:
 			return item
 		}
