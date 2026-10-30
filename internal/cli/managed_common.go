@@ -8,7 +8,8 @@ import (
 )
 
 // Shared plumbing for the managed service groups: `hubfly db` (service
-// "database") and `hubfly realtime` (service "realtime"). Every managed
+// "database"), `hubfly realtime` (service "realtime") and `hubfly stream`
+// (service "stream", managedServiceStream in stream_api.go). Every managed
 // instance lives under /api/v1/projects/{projectId}/managed/instances, so the
 // rt* types in realtime_api.go (rtInstance, rtOperation, rtPrice, rtSize)
 // describe instances of either service, and the rt* helpers in
@@ -28,6 +29,9 @@ type managedGroup struct {
 }
 
 func managedGroupFor(service string) managedGroup {
+	if service == managedServiceStream {
+		return managedGroup{Service: service, Command: "stream", Arg: "<server>", Noun: "stream server"}
+	}
 	if service == managedServiceRealtime {
 		return managedGroup{Service: service, Command: "realtime", Arg: "<server>", Noun: "realtime server"}
 	}
