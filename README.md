@@ -115,6 +115,7 @@ hubfly login [--token <TOKEN>]
 hubfly logout
 hubfly whoami
 hubfly projects
+hubfly project <list|history|transfer|transfers> [options]   # details: hubfly project help
 hubfly deploy [advanced|--advanced] [--project <id|name|new>] [--region <region>] [--yes]
               [--config <path>] [--detach] [--dockerfile <path>] [--builder-version <tag>]
 hubfly stack plan [--file <compose-file>]
