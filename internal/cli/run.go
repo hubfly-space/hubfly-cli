@@ -81,14 +81,7 @@ func run(args []string) error {
 	case "orgs", "org", "organizations":
 		return organizationsFlow()
 	case "project":
-		if len(args) >= 2 && args[1] == "list" {
-			orgFilter, err := parseOrgFilter(args[2:])
-			if err != nil {
-				return err
-			}
-			return projectsFlow(orgFilter)
-		}
-		return errors.New("usage: hubfly project list [--org <id|slug>]")
+		return runProjectGroup(args[1:])
 	case "container", "containers", "c":
 		return runContainerGroup(args[1:])
 	case "vm", "vms", "box", "boxes":
@@ -299,6 +292,11 @@ func printUsage() {
 	fmt.Println("  hubfly whoami")
 	fmt.Println("  hubfly projects [--org <id|slug>]")
 	fmt.Println("  hubfly orgs")
+	fmt.Println("")
+	fmt.Println("Project Transfers & History (details: hubfly project help):")
+	fmt.Println("  hubfly project transfer <project> --to <email> [--rotate-credentials] [--yes --confirm-name <name>]")
+	fmt.Println("  hubfly project transfers [list|status|show|accept|decline|cancel] ...")
+	fmt.Println("  hubfly project history <project> [--json]")
 	fmt.Println("")
 	fmt.Println("Containers (Cells):")
 	fmt.Println("  hubfly container list [--project <id|name>] [--org <id|slug>]")
