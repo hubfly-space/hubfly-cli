@@ -191,3 +191,59 @@ func TestManagedOperations(t *testing.T) {
 	}
 	dbdRunErr(t, "realtime server 'pg' not found", "rt", "operations", "pg")
 }
+
+func TestManagedLogsFollowReconnectsWithoutDuplicates(t *testing.T) {
+	env := setupDBDTest(t)
+	var calls atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	moFollowContext = func() (context.Context, context.CancelFunc) { return ctx, cancel }
+	env.dash.on("GET", dbdTestPG+"/logs", func(rtRecorded) (int, any) {
+		switch calls.Add(1) {
+		case 1:
+			return http.StatusOK, map[string]any{"stdout": "a\nb\n", "tailBytes": 4096}
+		case 2, 3:
+			return http.StatusInternalServerError, map[string]any{"ok": false, "error": map[string]any{"code": "INTERNAL", "message": "agent down"}}
+		default:
+			cancel()
+			return http.StatusOK, map[string]any{"stdout": "a\nb\nc\n", "tailBytes": 4096}
+		}
+	})
+	done := make(chan error, 1)
+	go func() { done <- run([]string{"db", "logs", "pg", "--follow"}) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("follow error = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("follow did not stop on cancel")
+	}
+	if got := env.out.String(); got != "a\nb\nc\n" {
+		t.Fatalf("follow output = %q", got)
+	}
+	if errText := env.errOut.String(); !strings.Contains(errText, "reconnecting") || !strings.Contains(errText, "reconnected") {
+		t.Fatalf("stderr = %q", errText)
+	}
+}
+
+func TestManagedLogsFollowStopsOnAuthError(t *testing.T) {
+	env := setupDBDTest(t)
+	var calls atomic.Int32
+	moFollowContext = func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) }
+	env.dash.on("GET", dbdTestPG+"/logs", func(rtRecorded) (int, any) {
+		if calls.Add(1) == 1 {
+			return http.StatusOK, map[string]any{"stdout": "a\n", "tailBytes": 4096}
+		}
+		return http.StatusForbidden, map[string]any{"ok": false, "error": map[string]any{"code": "FORBIDDEN", "message": "no access"}}
+	})
+	done := make(chan error, 1)
+	go func() { done <- run([]string{"db", "logs", "pg", "--follow"}) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error on 403")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("follow kept polling after 403")
+	}
+}
