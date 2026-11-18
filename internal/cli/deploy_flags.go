@@ -50,7 +50,7 @@ func parseDeployOptions(args []string) (deployOptions, error) {
 	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.Advanced, "advanced", opts.Advanced, "open config review mode before deploy")
-	fs.StringVar(&opts.Project, "project", "", "target project id, name, or 'new'")
+	fs.StringVar(&opts.Project, "project", "", "target project id, name, 'new', or a global project id (gpj_…, with --region)")
 	fs.StringVar(&opts.Region, "region", "", "target region id or name")
 	fs.BoolVar(&opts.AutoApprove, "yes", false, "skip interactive confirmation prompts")
 	fs.StringVar(&opts.ConfigPath, "config", "", "path to hubfly.build.json or a project directory")
@@ -81,10 +81,14 @@ func parseDeployOptions(args []string) (deployOptions, error) {
 
 func deployUsage() string {
 	return strings.TrimSpace(`
-usage: hubfly deploy [advanced] [--advanced] [--project <id|name|new>] [--region <region>]
+usage: hubfly deploy [advanced|plan|pull] [--advanced] [--project <id|name|new>] [--region <region>]
                      [--yes] [--config <path>] [--detach] [--dockerfile <path>]
-                     [--builder-version <tag>]
-`)
+                     [--builder-version <tag>] [--mode smart|replace] [--force-new] [--json]
+
+Uploads resume after network drops; Ctrl-C stops cleanly and says what is
+left on Hubfly. Files matched by .dockerignore or .hubflyignore stay out of
+the build context.
+`) + "\n\n" + deployExitCodesHelp()
 }
 
 func isInteractiveShell() bool {
