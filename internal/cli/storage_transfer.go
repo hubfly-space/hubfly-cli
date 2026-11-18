@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"mime"
@@ -11,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -25,8 +31,19 @@ import (
 // client with multipart upload.
 const storageMaxPutBytes = int64(20_000_000_000)
 
+// storageDefaultJobs and storageMaxJobs bound concurrent uploads of
+// `storage put --recursive`.
+const (
+	storageDefaultJobs = 4
+	storageMaxJobs     = 16
+)
+
 // storageProgressMinBytes is the size from which put/get show a progress line.
 const storageProgressMinBytes = int64(8 << 20)
+
+// storageProgressPlainEvery is how often a non-terminal stderr gets a
+// progress line.
+var storageProgressPlainEvery = 15 * time.Second
 
 // storageTransferClient has no overall timeout: large transfers may run for
 // a long time. Connection setup and response headers are still bounded.
@@ -57,6 +74,7 @@ func newStorageProgress(label string, total int64, quiet bool) *storageProgress 
 	p := &storageProgress{label: label, total: total, started: time.Now(), tty: rtStderrIsTerminal(), done: make(chan struct{}), stopped: make(chan struct{})}
 	go func() {
 		defer close(p.stopped)
+		lastLine := time.Now()
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -66,6 +84,11 @@ func newStorageProgress(label string, total int64, quiet bool) *storageProgress 
 			case <-ticker.C:
 				if p.tty {
 					_, _ = fmt.Fprint(rtErr, "\r"+padProgressLine(p.line()))
+				} else if time.Since(lastLine) >= storageProgressPlainEvery {
+					// Logs and CI get a plain line now and then instead of
+					// nothing until the end.
+					lastLine = time.Now()
+					_, _ = fmt.Fprintln(rtErr, p.line())
 				}
 			}
 		}
@@ -75,6 +98,13 @@ func newStorageProgress(label string, total int64, quiet bool) *storageProgress 
 
 func (p *storageProgress) line() string {
 	return renderUploadProgressLine(p.label, p.current.Load(), p.total, time.Since(p.started))
+}
+
+// set moves the counter (a retried transfer restarts from its offset).
+func (p *storageProgress) set(n int64) {
+	if p != nil {
+		p.current.Store(n)
+	}
 }
 
 func (p *storageProgress) add(n int) {
@@ -207,93 +237,535 @@ func storageWalkUploads(root, prefix string) ([]storageUploadItem, []string, err
 	return items, skipped, err
 }
 
-// storageUploadFile streams one file to a signed upload URL. contentType must
-// be the one the upload session was created with.
-func storageUploadFile(uploadURL, localPath, contentType string, size int64, quiet bool) error {
+// ---------------------------------------------------------------------------
+// Resilient transfers (shared by storage put/get and db import/export)
+// ---------------------------------------------------------------------------
+
+// transferMaxAttempts bounds consecutive failed attempts of one transfer
+// (network errors, 5xx, 429, expired links). An attempt that moved bytes
+// resets the count, so a long download over a flaky link still finishes.
+var transferMaxAttempts = 6
+
+// transferRetryDelay is the wait before retry number attempt (1-based).
+var transferRetryDelay = func(attempt int, header http.Header) time.Duration {
+	delay, _ := RetryDelay(attempt, header)
+	if delay > time.Minute {
+		delay = time.Minute
+	}
+	return delay
+}
+
+// transferLink returns the signed URL of a transfer; refresh=true asks for a
+// new one because the previous one expired or was refused.
+type transferLink func(refresh bool) (string, error)
+
+// transferHTTPError is a non-2xx answer from the storage host.
+type transferHTTPError struct {
+	Status int
+	Text   string
+	Header http.Header
+}
+
+func (e *transferHTTPError) Error() string { return e.Text }
+
+// transferLocalError is a local file failure (disk full, permissions): never
+// retried.
+type transferLocalError struct{ err error }
+
+func (e transferLocalError) Error() string { return e.err.Error() }
+func (e transferLocalError) Unwrap() error { return e.err }
+
+// transferVerifyError: the bytes on the other side do not match ours.
+type transferVerifyError struct{ text string }
+
+func (e transferVerifyError) Error() string { return e.text }
+
+// errTransferRestarted marks an attempt that emptied the destination to
+// start over (retried like a network error).
+var errTransferRestarted = errors.New("starting over")
+
+// errTransferInterrupted is returned when Ctrl-C stops a transfer.
+var errTransferInterrupted = errors.New("interrupted")
+
+// transferClassify says whether err is worth another attempt and whether
+// that attempt needs a fresh signed link.
+func transferClassify(err error) (retry, refresh bool) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, errTransferInterrupted) {
+		return false, false
+	}
+	var local transferLocalError
+	if errors.As(err, &local) {
+		return false, false
+	}
+	var httpErr *transferHTTPError
+	if errors.As(err, &httpErr) {
+		switch {
+		case httpErr.Status == http.StatusUnauthorized || httpErr.Status == http.StatusForbidden:
+			return true, true
+		case httpErr.Status == http.StatusRequestTimeout || httpErr.Status == http.StatusTooManyRequests || httpErr.Status >= 500:
+			return true, false
+		}
+		return false, false
+	}
+	// Network and read errors, and verification mismatches.
+	return true, false
+}
+
+// transferNotice prints a retry note on stderr without garbling a progress
+// line drawn in place.
+func transferNotice(format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+	if rtStderrIsTerminal() {
+		_, _ = fmt.Fprint(rtErr, "\r"+padProgressLine("")+"\r")
+	}
+	_, _ = fmt.Fprintln(rtErr, message)
+}
+
+// transferRetryWait sleeps before the next attempt; false means Ctrl-C.
+func transferRetryWait(ctx context.Context, what string, err error, attempt int, header http.Header) bool {
+	delay := transferRetryDelay(attempt, header)
+	transferNotice("%s failed (%v); retrying in %s (attempt %d of %d)", what, err, delay.Round(100*time.Millisecond), attempt+1, transferMaxAttempts)
+	return SleepContext(ctx, delay) == nil
+}
+
+func transferErrHeader(err error) http.Header {
+	var httpErr *transferHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Header
+	}
+	return nil
+}
+
+func isHexMD5(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+// transferETag is a response ETag without quotes or weak prefix.
+func transferETag(header http.Header) string {
+	value := strings.TrimSpace(header.Get("ETag"))
+	value = strings.TrimPrefix(value, "W/")
+	return strings.ToLower(strings.Trim(value, `"`))
+}
+
+// transferUpload PUTs localPath to the link, retrying failed attempts (a new
+// link when the old one is refused) and verifying what the server stored:
+// the size it reports and, for S3 links, the ETag against the local MD5.
+// Signed upload URLs take one PUT, so a failed attempt restarts the file.
+func transferUpload(ctx context.Context, link transferLink, localPath, contentType string, size int64, label string, quiet bool) error {
+	progress := newStorageProgress(label, size, quiet)
+	refresh := false
+	var lastErr error
+	for attempt := 1; ; attempt++ {
+		uploadURL, err := link(refresh)
+		if err != nil {
+			progress.finish(false)
+			return err
+		}
+		progress.set(0)
+		lastErr = transferUploadOnce(ctx, uploadURL, localPath, contentType, size, progress)
+		if lastErr == nil {
+			progress.finish(true)
+			return nil
+		}
+		if ctx.Err() != nil {
+			progress.finish(false)
+			return errTransferInterrupted
+		}
+		retry, needNew := transferClassify(lastErr)
+		if !retry || attempt >= transferMaxAttempts {
+			break
+		}
+		refresh = needNew
+		if !transferRetryWait(ctx, "upload of "+filepath.Base(localPath), lastErr, attempt, transferErrHeader(lastErr)) {
+			progress.finish(false)
+			return errTransferInterrupted
+		}
+	}
+	progress.finish(false)
+	return lastErr
+}
+
+func transferUploadOnce(ctx context.Context, uploadURL, localPath, contentType string, size int64, progress *storageProgress) error {
 	file, err := os.Open(localPath)
 	if err != nil {
-		return err
+		return transferLocalError{err}
 	}
 	defer func() { _ = file.Close() }()
-	progress := newStorageProgress("Uploading "+filepath.Base(localPath), size, quiet)
-	request, err := http.NewRequest(http.MethodPut, uploadURL, storageCountingReader{reader: file, progress: progress})
+	hasher := md5.New()
+	var body io.Reader = storageCountingReader{reader: io.TeeReader(file, hasher), progress: progress}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, body)
 	if err != nil {
-		progress.finish(false)
-		return err
+		return transferLocalError{err}
 	}
 	request.ContentLength = size
-	request.Header.Set("Content-Type", contentType)
+	if contentType != "" {
+		request.Header.Set("Content-Type", contentType)
+	}
 	if size == 0 {
 		request.Body = http.NoBody
 	}
 	debugf("HTTP request: PUT %s (signed upload URL, %d bytes)", storageRedactURL(uploadURL), size)
 	response, err := storageTransferClient.Do(request)
 	if err != nil {
-		progress.finish(false)
-		return fmt.Errorf("upload failed: %w", storageRedactError(err, uploadURL))
+		return storageRedactError(err, uploadURL)
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		progress.finish(false)
-		if response.StatusCode == http.StatusRequestEntityTooLarge {
-			return storageTooLargeError(localPath, size)
-		}
-		return fmt.Errorf("upload failed: %s", storageTransferStatus(response))
+		return &transferHTTPError{Status: response.StatusCode, Text: storageTransferStatus(response), Header: response.Header}
 	}
-	progress.finish(true)
+	sum := hex.EncodeToString(hasher.Sum(nil))
+	if etag := transferETag(response.Header); isHexMD5(etag) && size > 0 && etag != sum {
+		return transferVerifyError{fmt.Sprintf("checksum mismatch: the server stored MD5 %s, the local file is %s", etag, sum)}
+	}
+	reply, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+	var stored struct {
+		Size *int64 `json:"size"`
+	}
+	if json.Unmarshal(reply, &stored) == nil && stored.Size != nil && *stored.Size != size {
+		return transferVerifyError{fmt.Sprintf("size mismatch: the server stored %d of %d bytes", *stored.Size, size)}
+	}
 	return nil
 }
 
-// storageDownloadTo streams a signed download URL into out and returns the
-// number of bytes written.
-func storageDownloadTo(downloadURL string, out io.Writer, label string, quiet bool) (int64, error) {
-	debugf("HTTP request: GET %s (signed download URL)", storageRedactURL(downloadURL))
-	response, err := storageTransferClient.Get(downloadURL)
-	if err != nil {
-		return 0, fmt.Errorf("download failed: %w", storageRedactError(err, downloadURL))
-	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return 0, fmt.Errorf("download failed: %s", storageTransferStatus(response))
-	}
-	progress := newStorageProgress(label, response.ContentLength, quiet)
-	written, err := io.Copy(storageCountingWriter{writer: out, progress: progress}, response.Body)
-	progress.finish(err == nil)
-	if err != nil {
-		return written, fmt.Errorf("download failed: %w", err)
-	}
-	if response.ContentLength >= 0 && written != response.ContentLength {
-		return written, fmt.Errorf("download failed: received %d of %d bytes", written, response.ContentLength)
-	}
-	return written, nil
+// transferDownloadState carries a download across attempts (and, for files,
+// across runs).
+type transferDownloadState struct {
+	Offset int64  // bytes already written
+	Total  int64  // object size, -1 while unknown
+	ETag   string // validator seen first ("" = none)
+	// Restart empties the destination so the download can start over (nil
+	// when it cannot, e.g. stdout already received bytes).
+	Restart func() error
+	// Saved is called when Total/ETag are learned, to persist them.
+	Saved func()
+	// hash covers bytes 0..Offset when non-nil (checked against an MD5 ETag).
+	hash hash.Hash
 }
 
-// storageDownloadFile downloads into dest through a temporary file in the
-// same directory, so an interrupted download never leaves a partial file
-// under the final name.
-func storageDownloadFile(downloadURL, dest string, force, quiet bool) (int64, error) {
+type transferWriter struct {
+	writer io.Writer
+	state  *transferDownloadState
+	prog   *storageProgress
+}
+
+func (w transferWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if n > 0 {
+		if w.state.hash != nil {
+			w.state.hash.Write(p[:n])
+		}
+		w.state.Offset += int64(n)
+		w.prog.add(n)
+	}
+	if err != nil {
+		return n, transferLocalError{err}
+	}
+	return n, nil
+}
+
+// transferParseContentRange reads "bytes a-b/N" (or "bytes */N").
+func transferParseContentRange(value string) (start, total int64, ok bool) {
+	value = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(value), "bytes"))
+	span, size, found := strings.Cut(value, "/")
+	if !found {
+		return 0, 0, false
+	}
+	total = -1
+	if size != "*" {
+		parsed, err := strconv.ParseInt(size, 10, 64)
+		if err != nil {
+			return 0, 0, false
+		}
+		total = parsed
+	}
+	if span == "*" {
+		return -1, total, true
+	}
+	first, _, found := strings.Cut(span, "-")
+	if !found {
+		return 0, 0, false
+	}
+	parsed, err := strconv.ParseInt(first, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return parsed, total, true
+}
+
+// transferDownload streams the link into w from state.Offset, resuming with
+// Range requests after a failure. It refuses to splice two versions of an
+// object: a changed size or ETag restarts the download (or fails when it
+// cannot). With an MD5 ETag and state.hash set, the result is checksummed.
+func transferDownload(ctx context.Context, link transferLink, w io.Writer, state *transferDownloadState, label string, quiet bool) error {
+	var progress *storageProgress
+	refresh := false
+	failures := 0
+	restart := func(reason string) error {
+		if state.Restart == nil {
+			return transferLocalError{fmt.Errorf("stopped after %s: %s, and output already written cannot be rewound; run the command again", formatBytes(state.Offset), reason)}
+		}
+		transferNotice("%s; starting the download over", reason)
+		if err := state.Restart(); err != nil {
+			return transferLocalError{err}
+		}
+		state.Offset, state.Total, state.ETag = 0, -1, ""
+		if state.hash != nil {
+			state.hash.Reset()
+		}
+		progress.set(0)
+		return nil
+	}
+	defer func() { progress.finish(false) }()
+	for {
+		if ctx.Err() != nil {
+			return errTransferInterrupted
+		}
+		before := state.Offset
+		done, err := transferDownloadOnce(ctx, link, refresh, w, state, &progress, label, quiet, restart)
+		if !done && err == nil {
+			err = errTransferRestarted
+		}
+		if done && err == nil {
+			if state.Total >= 0 && state.Offset != state.Total {
+				err = fmt.Errorf("received %d of %d bytes", state.Offset, state.Total)
+			} else {
+				if state.hash != nil && isHexMD5(state.ETag) {
+					if sum := hex.EncodeToString(state.hash.Sum(nil)); sum != state.ETag {
+						return transferVerifyError{fmt.Sprintf("checksum mismatch: downloaded MD5 %s, the server has %s", sum, state.ETag)}
+					}
+				}
+				progress.finish(true)
+				progress = nil
+				return nil
+			}
+		}
+		if ctx.Err() != nil {
+			return errTransferInterrupted
+		}
+		retry, needNew := transferClassify(err)
+		if !retry {
+			return err
+		}
+		if state.Offset > before {
+			failures = 0
+		}
+		failures++
+		if failures >= transferMaxAttempts {
+			return err
+		}
+		refresh = needNew
+		if !transferRetryWait(ctx, "download", err, failures, transferErrHeader(err)) {
+			return errTransferInterrupted
+		}
+	}
+}
+
+func transferDownloadOnce(ctx context.Context, link transferLink, refresh bool, w io.Writer, state *transferDownloadState, progress **storageProgress, label string, quiet bool, restart func(string) error) (bool, error) {
+	downloadURL, err := link(refresh)
+	if err != nil {
+		return false, transferLocalError{err}
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return false, transferLocalError{err}
+	}
+	if state.Offset > 0 {
+		request.Header.Set("Range", fmt.Sprintf("bytes=%d-", state.Offset))
+	}
+	debugf("HTTP request: GET %s (signed download URL, from byte %d)", storageRedactURL(downloadURL), state.Offset)
+	response, err := storageTransferClient.Do(request)
+	if err != nil {
+		return false, storageRedactError(err, downloadURL)
+	}
+	defer func() { _ = response.Body.Close() }()
+	etag := transferETag(response.Header)
+	switch {
+	case response.StatusCode == http.StatusRequestedRangeNotSatisfiable && state.Offset > 0:
+		_, total, ok := transferParseContentRange(response.Header.Get("Content-Range"))
+		if ok && total == state.Offset && (state.Total < 0 || state.Total == total) {
+			state.Total = total
+			return true, nil
+		}
+		return false, restart("the partial download no longer matches the object")
+	case response.StatusCode == http.StatusOK && state.Offset > 0:
+		if err := restart("the server did not resume from byte " + strconv.FormatInt(state.Offset, 10)); err != nil {
+			return false, err
+		}
+		state.Total = response.ContentLength
+	case response.StatusCode == http.StatusPartialContent:
+		start, total, ok := transferParseContentRange(response.Header.Get("Content-Range"))
+		if !ok || start != state.Offset {
+			return false, restart("the server answered an unexpected range")
+		}
+		if state.Total >= 0 && total >= 0 && total != state.Total || state.ETag != "" && etag != "" && etag != state.ETag {
+			return false, restart("the object changed since the download started")
+		}
+		if state.Total < 0 {
+			state.Total = total
+		}
+	case response.StatusCode < 200 || response.StatusCode >= 300:
+		return false, &transferHTTPError{Status: response.StatusCode, Text: storageTransferStatus(response), Header: response.Header}
+	default:
+		state.Total = response.ContentLength
+	}
+	if state.ETag == "" {
+		state.ETag = etag
+	}
+	if state.Saved != nil {
+		state.Saved()
+	}
+	if *progress == nil {
+		*progress = newStorageProgress(label, state.Total, quiet)
+	}
+	(*progress).set(state.Offset)
+	_, err = io.Copy(transferWriter{writer: w, state: state, prog: *progress}, response.Body)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// storageUploadFile uploads one file through fresh upload sessions from
+// link (see transferUpload).
+func storageUploadFile(ctx context.Context, link transferLink, localPath, contentType string, size int64, quiet bool) error {
+	err := transferUpload(ctx, link, localPath, contentType, size, "Uploading "+filepath.Base(localPath), quiet)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errTransferInterrupted) {
+		return fmt.Errorf("upload of %s interrupted; nothing partial is kept, run the command again to upload it", localPath)
+	}
+	var httpErr *transferHTTPError
+	if errors.As(err, &httpErr) && httpErr.Status == http.StatusRequestEntityTooLarge {
+		return storageTooLargeError(localPath, size)
+	}
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		return err
+	}
+	return fmt.Errorf("upload failed: %w", err)
+}
+
+// storageDownloadTo streams a download into out (stdout); retries resume
+// from the bytes already written.
+func storageDownloadTo(ctx context.Context, link transferLink, out io.Writer, label string, quiet bool) (int64, error) {
+	state := &transferDownloadState{Total: -1, hash: md5.New()}
+	err := transferDownload(ctx, link, out, state, label, quiet)
+	if errors.Is(err, errTransferInterrupted) {
+		return state.Offset, fmt.Errorf("download interrupted after %s", formatBytes(state.Offset))
+	}
+	if err != nil {
+		return state.Offset, fmt.Errorf("download failed: %w", err)
+	}
+	return state.Offset, nil
+}
+
+// transferPartialMeta identifies the object a partial file belongs to.
+type transferPartialMeta struct {
+	Total int64  `json:"total"`
+	ETag  string `json:"etag,omitempty"`
+}
+
+// transferPartialPath is the resumable partial file of dest (hidden, next
+// to it, so the final rename stays on one file system).
+func transferPartialPath(dest string) string {
+	return filepath.Join(filepath.Dir(dest), "."+filepath.Base(dest)+".hubfly-part")
+}
+
+// transferDownloadFile downloads into dest through a partial file that
+// survives failures and Ctrl-C: running the same command again resumes it.
+// The partial is renamed over dest only once complete and verified.
+func transferDownloadFile(ctx context.Context, link transferLink, dest, label string, quiet bool, mode os.FileMode) (int64, error) {
+	partial := transferPartialPath(dest)
+	metaPath := partial + ".json"
+	state := &transferDownloadState{Total: -1, hash: md5.New()}
+	file, err := os.OpenFile(partial, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = file.Close()
+		}
+	}()
+	var meta transferPartialMeta
+	if info, statErr := file.Stat(); statErr == nil && info.Size() > 0 {
+		if raw, readErr := os.ReadFile(metaPath); readErr == nil && json.Unmarshal(raw, &meta) == nil && (meta.Total < 0 || info.Size() <= meta.Total) {
+			// Re-hash what is there so the checksum covers the whole file.
+			if _, err := io.Copy(state.hash, file); err != nil {
+				return 0, err
+			}
+			state.Offset, state.Total, state.ETag = info.Size(), meta.Total, meta.ETag
+			transferNotice("Resuming %s from %s", filepath.Base(dest), formatBytes(state.Offset))
+		} else if err := file.Truncate(0); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := file.Seek(state.Offset, io.SeekStart); err != nil {
+		return 0, err
+	}
+	state.Restart = func() error {
+		if err := file.Truncate(0); err != nil {
+			return err
+		}
+		_, err := file.Seek(0, io.SeekStart)
+		return err
+	}
+	saved := transferPartialMeta{Total: -2}
+	state.Saved = func() {
+		current := transferPartialMeta{Total: state.Total, ETag: state.ETag}
+		if current != saved {
+			saved = current
+			if raw, err := json.Marshal(current); err == nil {
+				_ = os.WriteFile(metaPath, raw, 0o600)
+			}
+		}
+	}
+	err = transferDownload(ctx, link, file, state, label, quiet)
+	if errors.Is(err, errTransferInterrupted) {
+		return state.Offset, fmt.Errorf("download interrupted after %s; the partial file %s is kept and running the same command again resumes it", formatBytes(state.Offset), partial)
+	}
+	var verifyErr transferVerifyError
+	if errors.As(err, &verifyErr) {
+		_ = file.Close()
+		closed = true
+		_ = os.Remove(partial)
+		_ = os.Remove(metaPath)
+		return state.Offset, fmt.Errorf("download failed: %w; the partial file was removed, run the command again", err)
+	}
+	if err != nil {
+		return state.Offset, fmt.Errorf("download failed: %w\nThe partial file %s is kept; running the same command again resumes it", err, partial)
+	}
+	if err := file.Sync(); err != nil {
+		return state.Offset, err
+	}
+	closed = true
+	if err := file.Close(); err != nil {
+		return state.Offset, err
+	}
+	if mode != 0 {
+		_ = os.Chmod(partial, mode)
+	}
+	if err := os.Rename(partial, dest); err != nil {
+		return state.Offset, err
+	}
+	_ = os.Remove(metaPath)
+	return state.Offset, nil
+}
+
+// storageDownloadFile downloads an object into dest (resumable).
+func storageDownloadFile(ctx context.Context, link transferLink, dest string, force, quiet bool) (int64, error) {
 	if !force {
 		if _, err := os.Lstat(dest); err == nil {
 			return 0, fmt.Errorf("%s already exists; pass --force to overwrite it", dest)
 		}
 	}
-	temp, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".*.part")
-	if err != nil {
-		return 0, err
-	}
-	written, err := storageDownloadTo(downloadURL, temp, "Downloading "+filepath.Base(dest), quiet)
-	closeErr := temp.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err == nil {
-		err = os.Rename(temp.Name(), dest)
-	}
-	if err != nil {
-		_ = os.Remove(temp.Name())
-		return written, err
-	}
-	return written, nil
+	return transferDownloadFile(ctx, link, dest, "Downloading "+filepath.Base(dest), quiet, 0)
 }
 
 // storageDownloadName is the default local file name for an object key.
