@@ -224,13 +224,13 @@ type BoxResizeInput struct {
 }
 
 type BoxCreateInput struct {
-	ProjectID   string `json:"projectId"`
-	Name        string `json:"name"`
-	ImageID     string `json:"imageId"`
-	VCPUs       int    `json:"vcpus"`
-	MemoryMiB   int    `json:"memoryMib"`
-	RootDiskGiB int    `json:"rootDiskGib"`
-	Username    string `json:"username,omitempty"`
+	ProjectID   string   `json:"projectId"`
+	Name        string   `json:"name"`
+	ImageID     string   `json:"imageId"`
+	VCPUs       int      `json:"vcpus"`
+	MemoryMiB   int      `json:"memoryMib"`
+	RootDiskGiB int      `json:"rootDiskGib"`
+	Username    string   `json:"username,omitempty"`
 	SSHKeys     []string `json:"sshKeys,omitempty"`
 }
 
@@ -248,11 +248,11 @@ type ContainerDetails struct {
 	Tier   string `json:"tier"`
 	Status string `json:"status"`
 	Source struct {
-		Type          string `json:"type"`
-		Template      string `json:"template,omitempty"`
-		GitRepository string `json:"gitRepository,omitempty"`
-		DockerImage   string `json:"dockerImage,omitempty"`
-		Branch        string `json:"branch,omitempty"`
+		Type           string `json:"type"`
+		Template       string `json:"template,omitempty"`
+		GitRepository  string `json:"gitRepository,omitempty"`
+		DockerImage    string `json:"dockerImage,omitempty"`
+		Branch         string `json:"branch,omitempty"`
 		DockerfilePath string `json:"dockerfilePath,omitempty"`
 	} `json:"source"`
 	Resources struct {
@@ -293,9 +293,9 @@ type ContainerMetricsResponse struct {
 }
 
 type BoxMetrics struct {
-	SampledAt int64                  `json:"sampledAt"`
-	Status    string                 `json:"status"`
-	Metrics   map[string]any         `json:"metrics"`
+	SampledAt int64          `json:"sampledAt"`
+	Status    string         `json:"status"`
+	Metrics   map[string]any `json:"metrics"`
 }
 
 type ProjectEnvVar struct {
