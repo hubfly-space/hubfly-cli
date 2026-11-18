@@ -145,6 +145,21 @@ hubfly storage <list|create|info|usage|buckets|ls|put|get|rm|url|keys|publish|sh
 hubfly analytics <sites|verify|snippet|stats|realtime|export|usage|keys> [options]
 ```
 
+Diagnose connection, auth, proxy, clock-skew and version problems:
+
+```bash
+hubfly doctor          # exits non-zero if any check fails
+hubfly doctor --json
+```
+
+Global flags go before the command (subcommand flags such as `db query --timeout` are separate):
+
+```bash
+hubfly --timeout 90s projects     # limit each API request (default 45s)
+hubfly --json-errors deploy       # errors as JSON on stderr
+hubfly --no-retry projects        # do not retry failed requests
+```
+
 ## Managed Realtime
 
 `hubfly realtime` (alias `rt`) manages HubFly Managed Realtime: Pusher-compatible
@@ -816,9 +831,9 @@ Multi-tunnel selection:
 - checks for the latest `hubfly-builder` release before deploy unless `--builder-version` pins a specific version
 - runs builder inspection for auto-detected stacks
 - builds the Docker image locally on your machine
-- uploads a compressed image archive to the regional builder with retryable chunk uploads
+- pushes the image layer by layer to the regional registry; after a dropped connection it retries with backoff and resumes, sending only the layers the registry does not have yet, then checks the pushed digest matches the local image
 - reports local build/upload failures back to the authenticated CLI deploy session endpoint
-- waits for the deploy by default, or returns early with `--detach`
+- waits for the deploy by default (printing deployment events as they happen and reconnecting if the network drops), or returns early with `--detach`
 
 Common examples:
 
@@ -857,6 +872,33 @@ hubfly deploy --project my-api --region eu-1 --config ./hubfly.build.json --yes
 ```
 
 Use `--detach` when a script only needs to upload the image and let Hubfly finish deployment in the background.
+
+`hubfly deploy plan` (add `--json` for machine output) is a dry run: it never creates a project or rewrites `hubfly.build.json`.
+
+**Progress output.** In a terminal the upload shows a live bar with speed and ETA. When stdout is not a terminal, or `CI` is set, it prints a plain progress line every 10 seconds instead. `NO_COLOR` turns colours off.
+
+**Build context.** Files matched by `.dockerignore` stay out of the image build. Add a `.hubflyignore` (same syntax) for rules that should apply to Hubfly deploys only. Before building, the CLI warns about files over 50 MB, a build context over 500 MB, and folders like `node_modules/` or `.git/` that are not ignored.
+
+**Concurrent deploys.** Only one deployment can run per container. If one is already running, the CLI says so, follows it, and exits with code 14 because your local changes were not deployed. Use `--force-new` to cancel it and deploy yours.
+
+**Ctrl-C.** During the local build or upload, Ctrl-C marks the Hubfly session failed, so nothing is deployed. After the upload, the rollout belongs to Hubfly and keeps going; the CLI prints the `hubfly deploy status|events|cancel <buildId>` commands to follow or stop it.
+
+**Exit codes** (`hubfly deploy` and `hubfly stack up`):
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Deployed, plan printed, or `--detach` upload finished |
+| 2 | Invalid usage or configuration |
+| 3 | Not authenticated or not allowed |
+| 5 | Other API error |
+| 6 | Network timeout talking to Hubfly |
+| 7 | Answered no at a confirmation prompt |
+| 10 | Local docker build failed (nothing uploaded) |
+| 11 | Image upload failed after retries (nothing deployed) |
+| 12 | Deployment failed or was stopped on Hubfly |
+| 13 | Outcome unknown: timed out or lost contact. Check `hubfly deploy status <buildId>` |
+| 14 | Another deployment is already active for this container |
+| 130 | Interrupted (Ctrl-C) |
 
 ## Build Config Tooling
 
