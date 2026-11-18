@@ -91,7 +91,7 @@ func saveStackState(projectDir string, state stackState) error {
 		return err
 	}
 	payload = append(payload, '\n')
-	return os.WriteFile(path, payload, 0o644)
+	return WriteFileAtomic(path, payload, 0o644)
 }
 
 func deleteStackState(projectDir string) error {
