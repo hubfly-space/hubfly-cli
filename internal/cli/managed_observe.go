@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,7 +34,7 @@ func runManagedObserveCommand(service, command string, args []string) error {
 
 // moFollowContext ends `logs --follow` (Ctrl-C). Tests replace it.
 var moFollowContext = func() (context.Context, context.CancelFunc) {
-	return signal.NotifyContext(context.Background(), os.Interrupt)
+	return signal.NotifyContext(RootContext(), os.Interrupt)
 }
 
 // ---------------------------------------------------------------------------
@@ -278,24 +279,58 @@ func managedLogsFlow(service string, args []string) error {
 	ctx, cancel := moFollowContext()
 	defer cancel()
 	lastOut, lastErr := logs.Stdout, logs.Stderr
+	failures := 0
 	for {
+		wait := rtPollInterval
+		if failures > 0 {
+			wait = moFollowBackoff(failures)
+		}
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(rtPollInterval):
+		case <-time.After(wait):
 		}
 		next, err := fetchManagedLogs(token, instance.ProjectID, instance.ID, tailBytes)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			debugf("logs poll failed: %v", err)
+			var apiErr *apiError
+			if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 && apiErr.Status != 408 && apiErr.Status != 429 {
+				return moAPIError(service, instance, err)
+			}
+			failures++
+			if failures == 1 || failures%moFollowNoticeEvery == 0 {
+				_, _ = fmt.Fprintf(rtErr, "(log stream interrupted: %v; reconnecting in %s)\n", err, moFollowBackoff(failures).Round(time.Second))
+			}
 			continue
 		}
+		if failures > 0 {
+			_, _ = fmt.Fprintln(rtErr, "(log stream reconnected)")
+			failures = 0
+		}
+		// The overlap with the last tail keeps lines from repeating after a
+		// reconnect; more output than one tail in the gap is printed whole.
 		_, _ = io.WriteString(rtOut, moNewLogText(lastOut, next.Stdout))
 		_, _ = io.WriteString(rtErr, moNewLogText(lastErr, next.Stderr))
 		lastOut, lastErr = next.Stdout, next.Stderr
 	}
+}
+
+// moFollowNoticeEvery is how many failed polls pass between notices.
+const moFollowNoticeEvery = 10
+
+// moFollowBackoff is the wait after the n-th consecutive failed poll:
+// doubling from the poll interval up to 30 seconds.
+func moFollowBackoff(failures int) time.Duration {
+	delay := rtPollInterval
+	for i := 1; i < failures && delay < 30*time.Second; i++ {
+		delay *= 2
+	}
+	if delay > 30*time.Second {
+		delay = 30 * time.Second
+	}
+	return delay
 }
 
 func moEnsureNewline(text string) string {
