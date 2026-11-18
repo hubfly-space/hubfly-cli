@@ -17,6 +17,8 @@ import (
 
 	"golang.org/x/net/websocket"
 	"golang.org/x/term"
+
+	"hubfly-cli/internal/version"
 )
 
 const (
@@ -56,7 +58,7 @@ func sshFlow(targetIDOrName string) error {
 		return err
 	}
 
-	fmt.Printf("Searching for '%s'...\n", targetIDOrName)
+	fmt.Fprintf(os.Stderr, "Searching for '%s'...\n", targetIDOrName)
 	targetContainer, targetProjectID, err := findContainer(token, targetIDOrName)
 	if err == nil && targetContainer != nil {
 		return sshContainerTerminal(
@@ -125,64 +127,153 @@ func sshContainerTerminal(
 	if err != nil {
 		return fmt.Errorf("failed to create terminal session: %w", err)
 	}
-	return runTerminalSession(session, displayName)
+	return runTerminalSessionWithRenew(session, displayName, func() (terminalSession, error) {
+		return createTerminalSession(token, projectID, containerID)
+	})
 }
+
+// terminalReconnectDelays is the backoff between reconnect attempts after a
+// transient websocket drop. Overridden in tests.
+var terminalReconnectDelays = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 15 * time.Second}
+
+// terminalIdleTimeout ends a connection that has received nothing (not even a
+// pong to our keepalive pings) for this long, so a half-open socket is
+// detected and reconnected instead of hanging forever.
+var terminalIdleTimeout = 3 * terminalPingInterval
+
+// terminalOutcome is how one websocket connection of a session ended.
+type terminalOutcome int
+
+const (
+	terminalDropped  terminalOutcome = iota // transient: reconnect
+	terminalFinished                        // remote exit, detach, signal or fatal error
+)
 
 // runTerminalSession attaches the local terminal to a Dashboard terminal
 // session (container terminals and managed database shells share the
-// protocol). When the remote shell exits, the CLI exits with its exit code.
-// On an interactive terminal, Ctrl+] detaches: the websocket is closed and the
-// CLI returns without sending exit/EOF to the remote shell.
+// protocol). It does not reconnect: see runTerminalSessionWithRenew.
 func runTerminalSession(session terminalSession, label string) error {
+	return runTerminalSessionWithRenew(session, label, nil)
+}
+
+// runTerminalSessionWithRenew attaches the local terminal to a terminal
+// session. When the remote shell exits, it returns a remoteExitError with the
+// shell's exit code (nil for 0) after the terminal is restored. On an
+// interactive terminal, Ctrl+] detaches without sending exit/EOF upstream.
+// When the websocket drops for a transient reason and renew is set, it opens
+// a new session (connect tokens are single-use) with backoff; the previous
+// shell's processes are gone, and the user is told so.
+func runTerminalSessionWithRenew(session terminalSession, label string, renew func() (terminalSession, error)) (err error) {
 	debugf("opening terminal session %s for %s", session.SessionID, label)
+
+	isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
+	restoreOutput := prepareTerminalOutput()
+	var oldState *term.State
+	var restoreOnce sync.Once
+	restoreTerminal := func() {
+		restoreOnce.Do(func() {
+			restoreOutput()
+			if oldState != nil {
+				_ = term.Restore(int(os.Stdin.Fd()), oldState)
+			}
+		})
+	}
+	// Restore the terminal on every exit path, including a panic.
+	defer func() {
+		if r := recover(); r != nil {
+			restoreTerminal()
+			panic(r)
+		}
+		restoreTerminal()
+	}()
+	if isTerminal {
+		state, rawErr := term.MakeRaw(int(os.Stdin.Fd()))
+		if rawErr != nil {
+			debugf("failed to enter raw terminal mode: %v", rawErr)
+			isTerminal = false
+		} else {
+			oldState = state
+		}
+	}
+
+	// One stdin reader for the whole session, so a reconnect never leaves a
+	// stale reader swallowing keystrokes meant for the new connection.
+	input := make(chan []byte, 16)
+	stdinEOF := make(chan struct{})
+	go readTerminalStdin(input, stdinEOF)
+
+	signals := make(chan os.Signal, 1)
+	notifyTerminalSignals(signals)
+	defer stopTerminalSignals(signals)
+
+	attempt := 0
+	for {
+		outcome, connErr := runTerminalConnection(session, label, isTerminal, input, stdinEOF, signals, attempt > 0)
+		if outcome == terminalFinished {
+			return connErr
+		}
+		if renew == nil {
+			return connErr
+		}
+		debugf("terminal connection dropped: %v", connErr)
+		var renewed bool
+		for attempt < len(terminalReconnectDelays) {
+			delay := terminalReconnectDelays[attempt]
+			attempt++
+			fmt.Fprintf(os.Stderr, "\r\nConnection to %s lost (%v). Reconnecting in %s (attempt %d/%d)...\r\n", label, connErr, delay, attempt, len(terminalReconnectDelays))
+			select {
+			case <-signals:
+				return &remoteExitError{code: 130}
+			case <-time.After(delay):
+			}
+			next, renewErr := renew()
+			if renewErr != nil {
+				connErr = renewErr
+				var apiErr *apiError
+				if errors.As(renewErr, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 && apiErr.Status != 408 && apiErr.Status != 429 {
+					return fmt.Errorf("could not reopen the terminal: %w", renewErr)
+				}
+				continue
+			}
+			session, renewed = next, true
+			break
+		}
+		if !renewed {
+			return fmt.Errorf("terminal connection lost and %d reconnect attempts failed: %w", len(terminalReconnectDelays), connErr)
+		}
+	}
+}
+
+// runTerminalConnection runs one websocket connection of a terminal session.
+func runTerminalConnection(
+	session terminalSession, label string, isTerminal bool,
+	input <-chan []byte, stdinEOF <-chan struct{}, signals <-chan os.Signal, reconnected bool,
+) (terminalOutcome, error) {
 	cols, rows := 80, 24
 	if w, h, sizeErr := term.GetSize(int(os.Stdout.Fd())); sizeErr == nil && w > 0 && h > 0 {
 		cols, rows = w, h
 	}
-
 	wsConfig, err := websocket.NewConfig(session.ConnectURL, apiHost)
 	if err != nil {
-		return fmt.Errorf("invalid terminal connect url: %w", err)
+		return terminalFinished, fmt.Errorf("invalid terminal connect url: %w", err)
 	}
-
+	wsConfig.Header.Set("User-Agent", version.UserAgent())
 	dialCtx, cancelDial := context.WithTimeout(context.Background(), terminalDialTimeout)
-	defer cancelDial()
 	conn, err := wsConfig.DialContext(dialCtx)
+	cancelDial()
 	if err != nil {
-		return fmt.Errorf("failed to connect to terminal: %w", err)
+		if reconnected {
+			return terminalDropped, err
+		}
+		return terminalFinished, fmt.Errorf("failed to connect to terminal: %w", err)
 	}
 	defer conn.Close()
 
 	if err := sendTerminalMessage(conn, terminalClientMessage{
-		Type:         "authenticate",
-		SessionID:    session.SessionID,
-		ConnectToken: session.ConnectToken,
-		Rows:         rows,
-		Cols:         cols,
+		Type: "authenticate", SessionID: session.SessionID, ConnectToken: session.ConnectToken, Rows: rows, Cols: cols,
 	}); err != nil {
-		return fmt.Errorf("failed to authenticate terminal session: %w", err)
+		return terminalDropped, fmt.Errorf("failed to authenticate terminal session: %w", err)
 	}
-
-	isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
-	restoreOutput := prepareTerminalOutput()
-	defer restoreOutput()
-	var oldState *term.State
-	if isTerminal {
-		oldState, err = term.MakeRaw(int(os.Stdin.Fd()))
-		if err != nil {
-			debugf("failed to enter raw terminal mode: %v", err)
-			isTerminal = false
-		} else {
-			fmt.Fprintf(os.Stderr, "Connected to %s. Press Ctrl+] to detach.\r\n", label)
-		}
-	}
-	restoreTerminal := func() {
-		restoreOutput()
-		if isTerminal && oldState != nil {
-			_ = term.Restore(int(os.Stdin.Fd()), oldState)
-		}
-	}
-	defer restoreTerminal()
 
 	done := make(chan struct{})
 	var shutdownOnce sync.Once
@@ -195,35 +286,42 @@ func runTerminalSession(session terminalSession, label string) error {
 	defer shutdown()
 
 	var authenticated atomic.Bool
-	var stdinStarted atomic.Bool
-	var detached atomic.Bool
-	onDetach := func() {
-		detached.Store(true)
-		shutdown()
-	}
-
+	var detached, interrupted, everAuthenticated atomic.Bool
 	go watchResize(conn, &authenticated, done)
 	go sendTerminalPings(conn, &authenticated, done)
-
-	startStdinPump := func() {
-		if !stdinStarted.CompareAndSwap(false, true) {
-			return
+	go func() {
+		select {
+		case <-done:
+		case <-signals:
+			interrupted.Store(true)
+			shutdown()
 		}
-		go pumpStdin(conn, done, isTerminal, onDetach)
-	}
+	}()
+	startPump := sync.OnceFunc(func() {
+		go forwardTerminalInput(conn, input, stdinEOF, done, isTerminal, func() {
+			detached.Store(true)
+			shutdown()
+		})
+	})
 
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(terminalIdleTimeout))
 		var raw []byte
 		if err := websocket.Message.Receive(conn, &raw); err != nil {
 			if detached.Load() {
-				restoreTerminal()
 				fmt.Fprintf(os.Stderr, "\r\nDetached from %s.\r\n", label)
-				return nil
+				return terminalFinished, nil
+			}
+			if interrupted.Load() {
+				return terminalFinished, &remoteExitError{code: 130}
 			}
 			if errors.Is(err, io.EOF) {
-				return errors.New("terminal connection closed unexpectedly")
+				err = errors.New("connection closed unexpectedly")
 			}
-			return fmt.Errorf("terminal connection error: %w", err)
+			if !everAuthenticated.Load() && !reconnected {
+				return terminalFinished, fmt.Errorf("terminal connection error: %w", err)
+			}
+			return terminalDropped, err
 		}
 
 		var msg terminalServerMessage
@@ -231,26 +329,45 @@ func runTerminalSession(session terminalSession, label string) error {
 			debugf("failed to decode terminal message: %v", jsonErr)
 			continue
 		}
-
 		switch msg.Type {
 		case "hello":
 			debugf("terminal hello: protocol version %d", msg.ProtocolVersion)
 		case "authenticated":
 			authenticated.Store(true)
-			startStdinPump()
+			if !everAuthenticated.Swap(true) {
+				if reconnected {
+					fmt.Fprintf(os.Stderr, "\r\nReconnected to %s in a new shell; programs from the previous shell ended.\r\n", label)
+				} else if isTerminal {
+					fmt.Fprintf(os.Stderr, "Connected to %s. Press Ctrl+] to detach.\r\n", label)
+				}
+			}
+			startPump()
 		case "output":
 			_, _ = os.Stdout.WriteString(msg.Data)
 		case "exit":
-			shutdown()
-			restoreTerminal()
-			os.Exit(msg.ExitCode)
+			return terminalFinished, remoteExitStatus(msg.ExitCode)
 		case "error":
-			fmt.Fprintf(os.Stderr, "\nterminal error: %s\n", msg.Message)
-			return fmt.Errorf("terminal session failed: %s", msg.Message)
+			fmt.Fprintf(os.Stderr, "\r\nterminal error: %s\r\n", msg.Message)
+			return terminalFinished, fmt.Errorf("terminal session failed: %s", msg.Message)
 		case "pong":
-			// liveness only, nothing to do
+			// liveness only; the read deadline was already extended
 		default:
 			debugf("unhandled terminal message type: %s", msg.Type)
+		}
+	}
+}
+
+// readTerminalStdin copies stdin into input until it fails, then closes eof.
+func readTerminalStdin(input chan<- []byte, eof chan<- struct{}) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if n > 0 {
+			input <- append([]byte(nil), buf[:n]...)
+		}
+		if err != nil {
+			close(eof)
+			return
 		}
 	}
 }
@@ -272,40 +389,39 @@ func splitAtDetach(b []byte) ([]byte, bool) {
 	return b, false
 }
 
-func pumpStdin(conn *websocket.Conn, done <-chan struct{}, detachEnabled bool, onDetach func()) {
-	buf := make([]byte, 4096)
+// forwardTerminalInput sends local input to one connection until it ends.
+func forwardTerminalInput(conn *websocket.Conn, input <-chan []byte, eof <-chan struct{}, done <-chan struct{}, detachEnabled bool, onDetach func()) {
 	for {
-		n, readErr := os.Stdin.Read(buf)
-		if n > 0 {
-			data, detach := buf[:n], false
+		select {
+		case <-done:
+			return
+		case <-eof:
+			for drained := false; !drained; {
+				select {
+				case chunk := <-input:
+					_ = sendTerminalMessage(conn, terminalClientMessage{Type: "input", Data: string(chunk)})
+				default:
+					drained = true
+				}
+			}
+			// Local stdin closed (Ctrl+D on a pipe): forward end-of-transmission
+			// so the remote shell sees EOF too; it decides whether to exit.
+			_ = sendTerminalMessage(conn, terminalClientMessage{Type: "input", Data: "\x04"})
+			return
+		case chunk := <-input:
+			data, detach := chunk, false
 			if detachEnabled {
 				data, detach = splitAtDetach(data)
 			}
 			if len(data) > 0 {
-				if sendErr := sendTerminalMessage(conn, terminalClientMessage{
-					Type: "input",
-					Data: string(data),
-				}); sendErr != nil {
+				if err := sendTerminalMessage(conn, terminalClientMessage{Type: "input", Data: string(data)}); err != nil {
 					return
 				}
 			}
 			if detach {
-				// Local-only: close the session without sending exit/EOF upstream.
 				onDetach()
 				return
 			}
-		}
-		if readErr != nil {
-			// Local stdin closed (Ctrl+D) - forward end-of-transmission so the
-			// remote shell sees EOF too, then stop reading. The WS stays open;
-			// the remote shell decides whether to exit.
-			_ = sendTerminalMessage(conn, terminalClientMessage{Type: "input", Data: "\x04"})
-			return
-		}
-		select {
-		case <-done:
-			return
-		default:
 		}
 	}
 }
