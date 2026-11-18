@@ -28,5 +28,5 @@ func main() {
 		return
 	}
 
-	os.Exit(cli.Run(args))
+	os.Exit(cli.Main(args))
 }
