@@ -564,5 +564,7 @@ func dbShellFlow(args []string) error {
 		return dbAPIError(instance.Name, err)
 	}
 	_, _ = fmt.Fprintf(rtErr, "Opening %s on database '%s' (exit with Ctrl+D)...\n", dbClientName(instance.Engine), instance.Name)
-	return runTerminalSession(session, "database "+instance.Name)
+	return runTerminalSessionWithRenew(session, "database "+instance.Name, func() (terminalSession, error) {
+		return createDBShellSession(token, instance)
+	})
 }
