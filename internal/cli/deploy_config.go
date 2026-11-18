@@ -117,7 +117,7 @@ func saveDeployConfig(path string, cfg deployConfigFile) error {
 		return err
 	}
 	payload = append(payload, '\n')
-	return os.WriteFile(path, payload, 0o644)
+	return WriteFileAtomic(path, payload, 0o644)
 }
 
 func defaultDeployConfig(projectDir string) deployConfigFile {
