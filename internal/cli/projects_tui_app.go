@@ -49,7 +49,9 @@ func (i appItem) FilterValue() string { return i.title + " " + i.desc }
 
 type projectsLoadedMsg struct {
 	projects []project
-	err      error
+	// globals are global projects (gpj_…), listed after the classic ones.
+	globals []globalProjectSummary
+	err     error
 }
 
 type containersLoadedMsg struct {
@@ -108,6 +110,7 @@ type projectsApp struct {
 	view  projectsView
 
 	projects          []project
+	globals           []globalProjectSummary
 	selectedProject   project
 	containers        []container
 	selectedContainer container
@@ -190,7 +193,8 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.projects = msg.projects
-		if len(msg.projects) == 0 {
+		m.globals = msg.globals
+		if len(msg.projects) == 0 && len(msg.globals) == 0 {
 			m.status = "No projects found. Press q to quit."
 			m.list.SetItems([]list.Item{})
 			m.list.Title = "Hubfly Projects"
@@ -413,6 +417,13 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if key.String() == "enter" {
 				item, ok := m.list.SelectedItem().(appItem)
 				if !ok {
+					return m, nil
+				}
+				if item.idx >= len(m.projects) {
+					// Global projects have no containers of their own here.
+					if g := item.idx - len(m.projects); g < len(m.globals) {
+						m.status = fmt.Sprintf("Global project: run hubfly project get %s, or hubfly deploy --project %s --region <region>", m.globals[g].ID, m.globals[g].ID)
+					}
 					return m, nil
 				}
 				m.selectedProject = m.projects[item.idx]
@@ -738,6 +749,17 @@ func (m *projectsApp) setProjectItems() {
 			idx:   i,
 		})
 	}
+	for i, g := range m.globals {
+		spent := ""
+		if g.Billing != nil {
+			spent = g.Billing.SpentAmount
+		}
+		items = append(items, appItem{
+			title: g.Name + " (global)",
+			desc:  fmt.Sprintf("global: %s | %s | spent=%s | %s", globalProjectRegionNames(g), g.Status, valueOrDash(spent), g.ID),
+			idx:   len(m.projects) + i,
+		})
+	}
 	m.setListItems("Projects", items, "Type to filter, Enter select, q quit", true)
 }
 
@@ -844,7 +866,12 @@ func (m *projectsApp) stopAllMulti() {
 func fetchProjectsCmd(token, orgID string) tea.Cmd {
 	return func() tea.Msg {
 		projects, err := fetchProjectsWithOrg(token, orgID)
-		return projectsLoadedMsg{projects: projects, err: err}
+		if err != nil {
+			return projectsLoadedMsg{err: err}
+		}
+		// Global projects are extra: a failure leaves the classic list.
+		globals, _ := fetchGlobalProjects(token, orgID)
+		return projectsLoadedMsg{projects: projects, globals: globals}
 	}
 }
 
