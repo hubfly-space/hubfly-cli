@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -120,6 +121,9 @@ func stackUpFlow(args []string) error {
 	}
 	printDeployWarnings("Stack warnings", spec.Warnings)
 
+	ctx, cancel := newDeployContext()
+	defer cancel()
+
 	token, err := ensureAuth(true)
 	if err != nil {
 		return err
@@ -155,6 +159,15 @@ func stackUpFlow(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Persist progress after every step: if a later service fails or the run
+	// is interrupted, the next `stack up` reuses what was already created
+	// instead of creating duplicate containers and volumes.
+	saveProgress := func() {
+		if saveErr := saveStackState(spec.ProjectDir, state); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not save stack state: %v\n", saveErr)
+		}
+	}
+	saveProgress()
 
 	ordered, err := stackDeployOrder(spec.Services)
 	if err != nil {
@@ -166,6 +179,10 @@ func stackUpFlow(args []string) error {
 	}
 
 	for _, service := range ordered {
+		if ctx.Err() != nil {
+			saveProgress()
+			return interruptedBeforeSession()
+		}
 		fmt.Printf("\nService %s\n", service.Name)
 		binding := state.Services[service.Name]
 		exists := binding.ContainerID != "" && currentContainers[binding.ContainerID].ID != ""
@@ -182,12 +199,14 @@ func stackUpFlow(args []string) error {
 				}
 				return fmt.Errorf("service %s requires a local build; rerun without --no-build", service.Name)
 			}
-			serviceState, deployErr := deployBuiltStackService(token, cfg, service, binding, volumeBindings)
+			serviceState, deployErr := deployBuiltStackService(ctx, token, cfg, service, binding, volumeBindings)
 			if deployErr != nil {
+				saveProgress()
 				return deployErr
 			}
 			serviceState.ConfigHash = service.ConfigHash
 			state.Services[service.Name] = serviceState
+			saveProgress()
 			continue
 		}
 
@@ -196,13 +215,17 @@ func stackUpFlow(args []string) error {
 			if err := removeProjectContainer(token, cfg.Project.ID, binding.ContainerID); err != nil {
 				return err
 			}
+			delete(state.Services, service.Name)
+			saveProgress()
 		}
 		serviceState, createErr := createImageStackService(token, cfg.Project.ID, service, volumeBindings)
 		if createErr != nil {
+			saveProgress()
 			return createErr
 		}
 		serviceState.ConfigHash = service.ConfigHash
 		state.Services[service.Name] = serviceState
+		saveProgress()
 	}
 
 	if *removeOrphans {
@@ -510,6 +533,7 @@ func ensureStackVolumes(
 }
 
 func deployBuiltStackService(
+	ctx context.Context,
 	token string,
 	projectCfg deployConfigFile,
 	service stackServiceSpec,
@@ -517,40 +541,52 @@ func deployBuiltStackService(
 	volumeBindings map[string]string,
 ) (stackServiceState, error) {
 	deploymentConfig := buildStackDeploymentConfig(projectCfg, service, volumeBindings)
-	session, err := createDeploySession(token, createDeploySessionRequest{
+	session, err := createDeploySessionResilient(ctx, token, createDeploySessionRequest{
 		BoundContainerID: strings.TrimSpace(binding.ContainerID),
 		ApplyMode:        "smart",
 		Config:           deploymentConfig,
 	})
 	if err != nil {
+		if isActiveDeploymentConflict(err) {
+			buildID, _ := activeDeploymentConflictDetails(err)
+			return stackServiceState{}, &deployExitError{code: exitDeployConflict, err: fmt.Errorf(
+				"service %s: %s", service.Name, activeDeploymentMessage(buildID, "", ""),
+			)}
+		}
 		return stackServiceState{}, err
 	}
 
 	localTag := generateLocalImageTag(session.BuildID)
 	fmt.Printf("Deploy build id: %s\n", session.BuildID)
 	printDeployStep("Local build", fmt.Sprintf("docker build for service %s", service.Name))
-	if err := buildStackServiceImage(service, localTag); err != nil {
+	if err := buildStackServiceImage(ctx, service, localTag); err != nil {
+		if ctx.Err() != nil {
+			return stackServiceState{}, interruptedBeforeRollout(token, session, "the local build of service "+service.Name)
+		}
 		_ = reportDeployFailure(token, session.BuildID, session.Upload.Token, "Stack local build failed: "+err.Error())
-		return stackServiceState{}, err
+		return stackServiceState{}, &deployExitError{code: exitDeployBuildFailed, err: fmt.Errorf("service %s: local docker build failed: %w", service.Name, err)}
 	}
 	defer func() { _ = removeLocalImage(localTag) }()
 
 	printDeployStep("Image upload", fmt.Sprintf("Streaming image to %s (%s)", session.Region.Name, session.Region.PrimaryIP))
-	imageDigest, err := uploadLocalImage(localTag, session)
+	imageDigest, err := uploadLocalImageContext(ctx, localTag, session)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return stackServiceState{}, interruptedBeforeRollout(token, session, "the image upload of service "+service.Name)
+		}
 		_ = reportDeployFailure(token, session.BuildID, session.Upload.Token, "Stack image upload failed: "+err.Error())
-		return stackServiceState{}, err
+		return stackServiceState{}, &deployExitError{code: exitDeployUploadFailed, err: fmt.Errorf("service %s: %w", service.Name, err)}
 	}
-	if err := completeDeployUpload(token, session, imageDigest); err != nil {
-		return stackServiceState{}, fmt.Errorf("finalize service %s upload: %w", service.Name, err)
+	if err := completeDeployUploadWithRetry(ctx, token, session, imageDigest); err != nil {
+		return stackServiceState{}, withDeployExitCode(exitDeployUnknown, fmt.Errorf("finalize service %s upload: %w (check `hubfly deploy status %s`)", service.Name, err, session.BuildID))
 	}
 
-	status, err := waitForDeploySession(token, session.BuildID)
+	status, err := waitForDeploySessionContext(ctx, token, session.BuildID)
 	if err != nil {
 		return stackServiceState{}, err
 	}
-	if status.Build.Status != "success" {
-		return stackServiceState{}, fmt.Errorf("service %s deployment failed: %s", service.Name, deploySessionFailureMessage(status))
+	if outcomeErr := deployOutcomeError(status, "service "+service.Name+" deployment"); outcomeErr != nil {
+		return stackServiceState{}, outcomeErr
 	}
 	containerID := strings.TrimSpace(status.Build.BoundContainerID)
 	if containerID == "" {
@@ -666,7 +702,7 @@ func buildStackDeploymentConfig(
 	}
 }
 
-func buildStackServiceImage(service stackServiceSpec, localTag string) error {
+func buildStackServiceImage(ctx context.Context, service stackServiceSpec, localTag string) error {
 	if service.Build == nil {
 		return fmt.Errorf("service %s does not define a local build", service.Name)
 	}
@@ -683,8 +719,15 @@ func buildStackServiceImage(service stackServiceSpec, localTag string) error {
 		args = append(args, "--build-arg", fmt.Sprintf("%s=%s", key, service.Build.Args[key]))
 	}
 	args = append(args, service.Build.ContextDir)
+	printDeployWarnings("Build context", buildContextWarnings(scanBuildContext(service.Build.ContextDir)))
+	removeIgnore, err := applyHubflyIgnore(service.Build.ContextDir, service.Build.DockerfilePath)
+	if err != nil {
+		return err
+	}
+	defer removeIgnore()
 
-	cmd := exec.Command("docker", args...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.WaitDelay = 10 * time.Second
 	cmd.Dir = service.Build.ContextDir
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
