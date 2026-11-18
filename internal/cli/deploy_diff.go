@@ -265,7 +265,7 @@ func deployDiffWarnings(cfg deployConfigFile, current *deployContainerSnapshotRe
 	desiredPorts := desiredPortSet(cfg.Deploy.Ports)
 	for port := range currentPorts {
 		if _, ok := desiredPorts[port]; !ok {
-			warnings = append(warnings, "A published port will be removed: "+port)
+			warnings = append(warnings, deployPortRemovalWarning+port)
 		}
 	}
 
@@ -435,4 +435,28 @@ func desiredEnvSet(env []deployEnvVar) map[string]struct{} {
 		set[key] = struct{}{}
 	}
 	return set
+}
+
+const deployPortRemovalWarning = "A published port will be removed: "
+
+// applyDeployModeToDiff aligns the local diff with the server's apply mode.
+// Smart mode never removes cloud-only ports (the server plan marks them
+// "preserve"), so those are reported as kept and do not count as destructive.
+func applyDeployModeToDiff(plan deployDiffPlan, mode string) deployDiffPlan {
+	if mode != "smart" {
+		return plan
+	}
+	destructive := false
+	warnings := make([]string, 0, len(plan.Warnings))
+	for _, warning := range plan.Warnings {
+		if port, ok := strings.CutPrefix(warning, deployPortRemovalWarning); ok {
+			warnings = append(warnings, "Published port "+port+" is not in hubfly.build.json; smart mode keeps it (use --mode replace to remove it)")
+			continue
+		}
+		warnings = append(warnings, warning)
+		destructive = true
+	}
+	plan.Warnings = warnings
+	plan.HasDestructive = destructive
+	return plan
 }
