@@ -411,15 +411,20 @@ func storageLsFlow(args []string) error {
 // ---------------------------------------------------------------------------
 
 func storagePutFlow(args []string) error {
-	const usage = "hubfly storage put <file|dir> <bucket>[/<key>] [--recursive] [--content-type <type>] [--project <p>]"
+	const usage = "hubfly storage put <file|dir> <bucket>[/<key>] [--recursive] [--jobs <n>] [--content-type <type>] [--project <p>]"
 	fs := newStorageFlags("put")
 	projectRef := storageProjectFlag(fs)
 	recursive := fs.Bool("recursive", false, "")
 	fs.BoolVar(recursive, "r", false, "")
 	contentType := fs.String("content-type", "", "")
+	jobs := fs.Int("jobs", storageDefaultJobs, "")
+	fs.IntVar(jobs, "j", storageDefaultJobs, "")
 	positionals, err := parseRealtimeArgs(fs, args, usage)
 	if err != nil {
 		return err
+	}
+	if *jobs < 1 || *jobs > storageMaxJobs {
+		return fmt.Errorf("invalid --jobs %d (1 to %d)", *jobs, storageMaxJobs)
 	}
 	if len(positionals) != 2 {
 		return fmt.Errorf("usage: %s", usage)
@@ -463,6 +468,7 @@ func storagePutFlow(args []string) error {
 	if err != nil {
 		return err
 	}
+	ctx := RootContext()
 	single := len(items) == 1
 	upload := func(item storageUploadItem) error {
 		kind, typeErr := storageContentType(item.LocalPath, *contentType)
@@ -476,7 +482,18 @@ func storagePutFlow(args []string) error {
 		if session.ContentType != "" {
 			kind = session.ContentType
 		}
-		return storageUploadFile(session.UploadURL, item.LocalPath, kind, item.Size, !single)
+		// A refused (expired) signed URL gets a new session on retry.
+		link := func(refresh bool) (string, error) {
+			if refresh {
+				fresh, freshErr := createStorageUploadSession(target.token, target.project.ID, bucket, item.Key, kind)
+				if freshErr != nil {
+					return "", storageAPIError(freshErr, fmt.Sprintf("bucket '%s' not found", bucket))
+				}
+				session = fresh
+			}
+			return session.UploadURL, nil
+		}
+		return storageUploadFile(ctx, link, item.LocalPath, kind, item.Size, !single)
 	}
 	if single {
 		if err := upload(items[0]); err != nil {
@@ -491,8 +508,11 @@ func storagePutFlow(args []string) error {
 	}
 	_, _ = fmt.Fprintf(rtErr, "Uploading %d files (%s) to %s/%s\n", len(items), formatBytes(total), bucket, key)
 	var printMu sync.Mutex
-	errs := storageParallel(len(items), 4, func(index int) error {
+	errs := storageParallel(len(items), *jobs, func(index int) error {
 		item := items[index]
+		if ctx.Err() != nil {
+			return errTransferInterrupted
+		}
 		uploadErr := upload(item)
 		printMu.Lock()
 		defer printMu.Unlock()
@@ -509,8 +529,11 @@ func storagePutFlow(args []string) error {
 			failed++
 		}
 	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("interrupted: %d of %d uploads did not finish; running the same command again uploads every file again", failed, len(items))
+	}
 	if failed > 0 {
-		return fmt.Errorf("%d of %d uploads failed", failed, len(items))
+		return fmt.Errorf("%d of %d uploads failed (listed above); run the command again to retry", failed, len(items))
 	}
 	_, _ = fmt.Fprintf(rtOut, "Uploaded %d files (%s).\n", len(items), formatBytes(total))
 	return nil
@@ -551,11 +574,23 @@ func storageGetFlow(args []string) error {
 	if err != nil {
 		return storageAPIError(err, fmt.Sprintf("object '%s/%s' not found", bucket, key))
 	}
+	// A refused (expired) link is replaced on retry.
+	link := func(refresh bool) (string, error) {
+		if refresh {
+			fresh, freshErr := createStorageDownload(target.token, target.project.ID, bucket, key)
+			if freshErr != nil {
+				return "", storageAPIError(freshErr, fmt.Sprintf("object '%s/%s' not found", bucket, key))
+			}
+			download = fresh
+		}
+		return download.DownloadURL, nil
+	}
+	ctx := RootContext()
 	if toStdout {
-		_, err = storageDownloadTo(download.DownloadURL, rtOut, "Downloading "+storageDownloadName(key), false)
+		_, err = storageDownloadTo(ctx, link, rtOut, "Downloading "+storageDownloadName(key), false)
 		return err
 	}
-	written, err := storageDownloadFile(download.DownloadURL, dest, *force, false)
+	written, err := storageDownloadFile(ctx, link, dest, *force, false)
 	if err != nil {
 		return err
 	}
