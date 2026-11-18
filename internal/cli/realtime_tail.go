@@ -52,7 +52,7 @@ var realtimeTailFamilies = []string{"conn", "sub", "member", "msg", "api", "err"
 
 // rtTailContext returns the context that ends tail (Ctrl-C). Tests replace it.
 var rtTailContext = func() (context.Context, context.CancelFunc) {
-	return signal.NotifyContext(context.Background(), os.Interrupt)
+	return signal.NotifyContext(RootContext(), os.Interrupt)
 }
 
 type realtimeTailFilter struct {
