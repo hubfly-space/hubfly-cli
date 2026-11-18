@@ -1,10 +1,9 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,8 +17,6 @@ import (
 
 const (
 	dbdTransferTimeout = 2 * time.Hour
-	// dbdTransferHTTPTimeout bounds one presigned upload or download.
-	dbdTransferHTTPTimeout = 6 * time.Hour
 )
 
 // dbdFormatsFor are the export/import formats of an engine; the first is the
@@ -118,7 +115,7 @@ func dbExportFlow(args []string) error {
 		return nil
 	}
 	if _, err := waitForManagedOperation(target.token, target.instance, created.OperationID, "Exporting "+dbdDatabasePhrase(target, databaseName), dbdTransferTimeout, false, false); err != nil {
-		return target.apiError(err)
+		return fmt.Errorf("%w\nThe export may still finish on the server; check with: hubfly db exports %s, then download it with: hubfly db exports download %s %s", target.apiError(err), target.name(), target.name(), exportID)
 	}
 	path, size, err := dbdDownloadExport(target, exportID, outputPath)
 	if err != nil {
@@ -142,7 +139,8 @@ func dbdRefuseOverwrite(path string) error {
 
 // dbdDownloadExport asks for a download link and streams the file to
 // outputPath ("" = the export's file name in the current directory, "-" =
-// stdout). It returns the path written and the byte count.
+// stdout). It returns the path written and the byte count. Failed attempts
+// retry with a fresh link and resume where they stopped.
 func dbdDownloadExport(target dbdTarget, exportID, outputPath string) (string, int64, error) {
 	link, err := createDBDExportDownload(target.token, target.instance.ProjectID, target.instance.ID, exportID)
 	if err != nil {
@@ -159,59 +157,36 @@ func dbdDownloadExport(target dbdTarget, exportID, outputPath string) (string, i
 			return "", 0, err
 		}
 	}
-	size, err := dbdDownloadToFile(link.URL, outputPath)
+	source := func(refresh bool) (string, error) {
+		if refresh {
+			fresh, freshErr := createDBDExportDownload(target.token, target.instance.ProjectID, target.instance.ID, exportID)
+			if freshErr != nil {
+				return "", target.apiError(freshErr)
+			}
+			link = fresh
+		}
+		return link.URL, nil
+	}
+	size, err := dbdDownloadToFile(RootContext(), source, outputPath)
 	return outputPath, size, err
 }
 
-// dbdDownloadToFile streams a presigned URL to path ("-" = stdout) through a
-// temporary file, so an interrupted download leaves no partial export behind.
-func dbdDownloadToFile(rawURL, path string) (int64, error) {
-	client := &http.Client{Timeout: dbdTransferHTTPTimeout}
-	resp, err := client.Get(rawURL)
-	if err != nil {
-		return 0, fmt.Errorf("download the export: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, fmt.Errorf("download the export: storage answered %s", resp.Status)
-	}
+// dbdDownloadToFile streams a presigned export to path ("-" = stdout)
+// through a resumable partial file: an interrupted download leaves no
+// partial export under the final name, and running the command again
+// resumes it.
+func dbdDownloadToFile(ctx context.Context, source transferLink, path string) (int64, error) {
 	if path == "-" {
-		return io.Copy(rtOut, resp.Body)
-	}
-	dir := filepath.Dir(path)
-	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.part")
-	if err != nil {
-		return 0, fmt.Errorf("write %s: %w", path, err)
-	}
-	tempPath := temp.Name()
-	keep := false
-	defer func() {
-		if !keep {
-			_ = temp.Close()
-			_ = os.Remove(tempPath)
+		written, err := storageDownloadTo(ctx, source, rtOut, "Downloading", true)
+		if err != nil {
+			return written, fmt.Errorf("download the export: %w", err)
 		}
-	}()
-	progress := newUploadProgress("Downloading", resp.ContentLength)
-	progress.writer = rtErr
-	progress.Start()
-	written, copyErr := io.Copy(temp, progress.Wrap(resp.Body))
-	progress.Finish()
-	if copyErr != nil {
-		return written, fmt.Errorf("download the export: %w", copyErr)
+		return written, nil
 	}
-	if resp.ContentLength > 0 && written != resp.ContentLength {
-		return written, fmt.Errorf("download the export: received %s of %s", formatBytes(written), formatBytes(resp.ContentLength))
+	written, err := transferDownloadFile(ctx, source, path, "Downloading "+filepath.Base(path), false, 0o600)
+	if err != nil {
+		return written, fmt.Errorf("download the export: %w", err)
 	}
-	if err := temp.Close(); err != nil {
-		return written, fmt.Errorf("write %s: %w", path, err)
-	}
-	if err := os.Chmod(tempPath, 0o600); err != nil {
-		return written, fmt.Errorf("write %s: %w", path, err)
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return written, fmt.Errorf("write %s: %w", path, err)
-	}
-	keep = true
 	return written, nil
 }
 
@@ -416,12 +391,23 @@ func dbImportFlow(args []string) error {
 	if upload.MaxBytes > 0 && info.Size() > upload.MaxBytes {
 		return fmt.Errorf("%s is %s; imports are limited to %s per file", filePath, formatBytes(info.Size()), formatBytes(upload.MaxBytes))
 	}
-	if err := dbdUploadFile(upload.UploadURL, filePath, info.Size()); err != nil {
-		return err
+	// An expired upload link is replaced by a new upload slot on retry.
+	source := func(refresh bool) (string, error) {
+		if refresh {
+			fresh, freshErr := createDBDImportUpload(target.token, target.instance.ProjectID, target.instance.ID, body)
+			if freshErr != nil {
+				return "", target.apiError(freshErr)
+			}
+			upload = fresh
+		}
+		return upload.UploadURL, nil
+	}
+	if err := dbdUploadFile(RootContext(), source, filePath, info.Size()); err != nil {
+		return fmt.Errorf("%w\nRetry with the same command.", err)
 	}
 	operationID, err := startDBDImport(target.token, target.instance.ProjectID, target.instance.ID, upload.ImportID)
 	if err != nil {
-		return target.apiError(err)
+		return fmt.Errorf("%w\nThe file was uploaded but the import did not start; nothing was imported. Retry with the same command.", target.apiError(err))
 	}
 	if *noWait {
 		_, _ = fmt.Fprintf(rtOut, "Import %s into %s started (operation %s).\n", upload.ImportID, dbdDatabasePhrase(target, databaseName), operationID)
@@ -429,40 +415,28 @@ func dbImportFlow(args []string) error {
 		return nil
 	}
 	if _, err := waitForManagedOperation(target.token, target.instance, operationID, "Importing into "+dbdDatabasePhrase(target, databaseName), dbdTransferTimeout, false, false); err != nil {
-		return target.apiError(err)
+		return fmt.Errorf("%w\nThe import runs on the server and is not rolled back: statements before a failure stay applied. Check it with: hubfly db operations %s\nBefore importing again, restore a backup in the Dashboard or clean up the partly imported data, since an import does not empty the database first.", target.apiError(err), target.name())
 	}
 	_, _ = fmt.Fprintf(rtOut, "Imported %s into %s.\n", filepath.Base(filePath), dbdDatabasePhrase(target, databaseName))
 	return nil
 }
 
-// dbdUploadFile PUTs a file to a presigned URL with a progress line on stderr.
-func dbdUploadFile(rawURL, path string, size int64) error {
-	file, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
+// dbdUploadFile PUTs a file to a presigned URL with a progress line on
+// stderr, retrying failed attempts and checking the stored ETag against the
+// file's MD5.
+func dbdUploadFile(ctx context.Context, source transferLink, path string, size int64) error {
+	err := transferUpload(ctx, source, path, "application/octet-stream", size, "Uploading "+filepath.Base(path), false)
+	if err == nil {
+		return nil
 	}
-	progress := newUploadProgress("Uploading", size)
-	progress.writer = rtErr
-	body := progress.Wrap(file)
-	defer func() { _ = body.Close() }()
-	req, err := http.NewRequest(http.MethodPut, rawURL, body)
-	if err != nil {
-		return err
+	if errors.Is(err, errTransferInterrupted) {
+		return fmt.Errorf("upload of %s interrupted; nothing was imported and the database is unchanged", path)
 	}
-	req.ContentLength = size
-	req.Header.Set("Content-Type", "application/octet-stream")
-	progress.Start()
-	resp, err := (&http.Client{Timeout: dbdTransferHTTPTimeout}).Do(req)
-	progress.Finish()
-	if err != nil {
-		return fmt.Errorf("upload %s: %w", path, err)
+	var httpErr *transferHTTPError
+	if errors.As(err, &httpErr) {
+		return fmt.Errorf("upload %s: storage answered %d %s; nothing was imported and the database is unchanged", path, httpErr.Status, strings.TrimSpace(dbdStorageErrorCode([]byte(httpErr.Text))))
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("upload %s: storage answered %s %s", path, resp.Status, strings.TrimSpace(dbdStorageErrorCode(detail)))
-	}
-	return nil
+	return fmt.Errorf("upload %s: %w; nothing was imported and the database is unchanged", path, err)
 }
 
 // dbdStorageErrorCode pulls <Code> out of an S3 XML error body.
