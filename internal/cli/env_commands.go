@@ -31,7 +31,7 @@ func runEnvGroup(args []string) error {
 		if strings.Contains(cmd, "=") {
 			return envSetFlow(args)
 		}
-		return fmt.Errorf("unknown env command %q (available: list, set, unset)", cmd)
+		return fmt.Errorf("unknown env command %q (available: list, set, unset)%s", cmd, didYouMean(cmd, []string{"list", "set", "unset"}))
 	}
 }
 
