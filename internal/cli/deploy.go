@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,6 +36,9 @@ func deployFlow(forceAdvanced bool) error {
 }
 
 func deployFlowWithOptions(opts deployOptions) error {
+	ctx, stopSignals := newDeployContext()
+	defer stopSignals()
+
 	token, err := ensureAuth(true)
 	if err != nil {
 		return err
@@ -85,12 +90,25 @@ func deployFlowWithOptions(opts deployOptions) error {
 	if err != nil {
 		return err
 	}
+	contextWarnings := buildContextWarnings(scanBuildContext(filepath.Join(projectDir, cfg.Build.ContextDir)))
 	if err := ensureDeployProjectBinding(token, projectDir, &cfg, opts); err != nil {
+		if errors.Is(err, errPlanNeedsNewProject) {
+			// A dry run must not create projects or rewrite the manifest.
+			if !quietJSONPlan {
+				printDeploySummary(projectDir, cfg, prepared)
+				printDeployWarnings("Builder warnings", prepared.Warnings)
+				printDeployWarnings("Build context", contextWarnings)
+				printDeployDiffPlan(buildDeployDiffPlan(projectDir, cfg, prepared, nil))
+			}
+			return printPlanForNewProject(opts)
+		}
 		return err
 	}
 	cfg.Metadata.BuilderVersion = prepared.BuilderVersion
-	if err := saveDeployConfig(cfgPath, cfg); err != nil {
-		return err
+	if !opts.PlanOnly {
+		if err := saveDeployConfig(cfgPath, cfg); err != nil {
+			return err
+		}
 	}
 
 	current, err := loadBoundContainerSnapshot(token, &cfg)
@@ -107,9 +125,16 @@ func deployFlowWithOptions(opts deployOptions) error {
 		}
 		if active.Session != nil {
 			if !opts.ForceNew {
-				fmt.Printf("Deployment %s is already active (%s/%s). Attaching to it.\n", active.Session.ID, active.Session.Status, active.Session.Phase)
-				_, waitErr := waitForDeploySession(token, active.Session.ID)
-				return waitErr
+				fmt.Println(activeDeploymentMessage(active.Session.ID, active.Session.Status, active.Session.Phase))
+				if opts.Detach {
+					return &deployExitError{code: exitDeployConflict, err: fmt.Errorf("deployment %s is already active; your changes were not deployed", active.Session.ID)}
+				}
+				fmt.Println("Following it; your local changes will NOT be deployed by this run.")
+				attached, waitErr := waitForDeploySessionContext(ctx, token, active.Session.ID)
+				if waitErr != nil {
+					return waitErr
+				}
+				return finishAttachedDeployment(attached, active.Session.ID)
 			}
 			if !opts.AutoApprove {
 				if !isInteractiveShell() {
@@ -132,8 +157,9 @@ func deployFlowWithOptions(opts deployOptions) error {
 	if !quietJSONPlan {
 		printDeploySummary(projectDir, cfg, prepared)
 		printDeployWarnings("Builder warnings", prepared.Warnings)
+		printDeployWarnings("Build context", contextWarnings)
 	}
-	diffPlan := buildDeployDiffPlan(projectDir, cfg, prepared, current)
+	diffPlan := applyDeployModeToDiff(buildDeployDiffPlan(projectDir, cfg, prepared, current), opts.Mode)
 	if !quietJSONPlan {
 		printDeployDiffPlan(diffPlan)
 	}
@@ -167,11 +193,12 @@ func deployFlowWithOptions(opts deployOptions) error {
 	if err := confirmDeployPlan(opts, diffPlan); err != nil {
 		return err
 	}
-	session, err := createDeploySessionWithMissingBoundFallback(token, cfgPath, &cfg, createDeploySessionRequest{
+	// One key per deploy invocation, reused by every retry of the POST below.
+	session, err := createDeploySessionWithMissingBoundFallback(ctx, token, cfgPath, &cfg, createDeploySessionRequest{
 		PlanID:               serverPlan.PlanID,
 		PlanHash:             serverPlan.PlanHash,
 		BaseCloudRevision:    serverPlan.CurrentRevision,
-		ClientIdempotencyKey: "cli-session:" + serverPlan.PlanHash,
+		ClientIdempotencyKey: newDeployIdempotencyKey("cli-session:" + serverPlan.PlanHash),
 		BuilderVersion:       prepared.BuilderVersion,
 		BoundContainerID:     strings.TrimSpace(cfg.Container.ID),
 		ApplyMode:            opts.Mode,
@@ -185,13 +212,25 @@ func deployFlowWithOptions(opts deployOptions) error {
 		if current != nil && !opts.ForceNew && isActiveDeploymentConflict(err) {
 			active, activeErr := fetchActiveDeploySession(token, current.Container.ID)
 			if activeErr == nil && active.Session != nil {
-				fmt.Printf("Deployment %s became active while this deploy was starting (%s/%s). Attaching to it.\n", active.Session.ID, active.Session.Status, active.Session.Phase)
+				fmt.Println(activeDeploymentMessage(active.Session.ID, active.Session.Status, active.Session.Phase))
 				if opts.Detach {
-					return nil
+					return &deployExitError{code: exitDeployConflict, err: fmt.Errorf("deployment %s became active while this deploy was starting; your changes were not deployed", active.Session.ID)}
 				}
-				_, waitErr := waitForDeploySession(token, active.Session.ID)
-				return waitErr
+				fmt.Println("Following it; your local changes will NOT be deployed by this run.")
+				attached, waitErr := waitForDeploySessionContext(ctx, token, active.Session.ID)
+				if waitErr != nil {
+					return waitErr
+				}
+				return finishAttachedDeployment(attached, active.Session.ID)
 			}
+			return withDeployExitCode(exitDeployConflict, err)
+		}
+		if ctx.Err() != nil {
+			var coded *deployExitError
+			if errors.As(err, &coded) {
+				return err
+			}
+			return interruptedBeforeSession()
 		}
 		return err
 	}
@@ -202,14 +241,17 @@ func deployFlowWithOptions(opts deployOptions) error {
 		"Local build",
 		fmt.Sprintf("docker build using %s", displayDeployBuildSource(projectDir, prepared)),
 	)
-	if err := buildLocalImage(projectDir, prepared.DockerfilePath, localTag, cfg); err != nil {
+	if err := buildLocalImage(ctx, projectDir, prepared.DockerfilePath, localTag, cfg); err != nil {
+		if ctx.Err() != nil {
+			return interruptedBeforeRollout(token, session, "the local build")
+		}
 		_ = reportDeployFailure(
 			token,
 			session.BuildID,
 			session.Upload.Token,
 			"Local build failed: "+err.Error(),
 		)
-		return err
+		return &deployExitError{code: exitDeployBuildFailed, err: fmt.Errorf("local docker build failed: %w (session %s marked failed; nothing was deployed)", err, session.BuildID)}
 	}
 	defer func() {
 		_ = removeLocalImage(localTag)
@@ -219,18 +261,24 @@ func deployFlowWithOptions(opts deployOptions) error {
 		"Image upload",
 		fmt.Sprintf("Streaming image to %s (%s)", session.Region.Name, session.Region.PrimaryIP),
 	)
-	imageDigest, err := uploadLocalImage(localTag, session)
+	imageDigest, err := uploadLocalImageContext(ctx, localTag, session)
 	if err != nil {
+		if ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled) {
+			return interruptedBeforeRollout(token, session, "the image upload")
+		}
 		_ = reportDeployFailure(
 			token,
 			session.BuildID,
 			session.Upload.Token,
 			"Image upload failed: "+err.Error(),
 		)
-		return err
+		return &deployExitError{code: exitDeployUploadFailed, err: fmt.Errorf("%w (session %s marked failed; nothing was deployed)", err, session.BuildID)}
 	}
-	if err := completeDeployUpload(token, session, imageDigest); err != nil {
-		return fmt.Errorf("finalize uploaded image: %w", err)
+	if err := completeDeployUploadWithRetry(ctx, token, session, imageDigest); err != nil {
+		return withDeployExitCode(exitDeployUnknown, fmt.Errorf(
+			"finalize uploaded image: %w. The image is uploaded; check `hubfly deploy status %s` before redeploying",
+			err, session.BuildID,
+		))
 	}
 
 	cfg.Metadata.BuilderVersion = prepared.BuilderVersion
@@ -247,12 +295,12 @@ func deployFlowWithOptions(opts deployOptions) error {
 		return nil
 	}
 
-	status, err := waitForDeploySession(token, session.BuildID)
+	status, err := waitForDeploySessionContext(ctx, token, session.BuildID)
 	if err != nil {
 		return err
 	}
-	if status.Build.Status != "success" {
-		return fmt.Errorf("deployment failed: %s", deploySessionFailureMessage(status))
+	if outcomeErr := deployOutcomeError(status, "deployment "+session.BuildID); outcomeErr != nil {
+		return outcomeErr
 	}
 
 	if strings.TrimSpace(status.Build.BoundContainerID) != "" {
@@ -462,12 +510,13 @@ func loadBoundContainerSnapshot(token string, cfg *deployConfigFile) (*deployCon
 }
 
 func createDeploySessionWithMissingBoundFallback(
+	ctx context.Context,
 	token, cfgPath string,
 	cfg *deployConfigFile,
 	req createDeploySessionRequest,
 	opts deployOptions,
 ) (deploySessionResponse, error) {
-	session, err := createDeploySession(token, req)
+	session, err := createDeploySessionResilient(ctx, token, req)
 	if !isMissingBoundContainerError(err) || strings.TrimSpace(cfg.Container.ID) == "" {
 		return session, err
 	}
@@ -503,12 +552,12 @@ func createDeploySessionWithMissingBoundFallback(
 	}
 
 	req.BoundContainerID = ""
-	return createDeploySession(token, req)
+	return createDeploySessionResilient(ctx, token, req)
 }
 
 func isMissingBoundContainerError(err error) bool {
-	apiErr, ok := err.(*apiError)
-	if !ok || apiErr.Status != http.StatusNotFound {
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
 		return false
 	}
 
@@ -516,9 +565,12 @@ func isMissingBoundContainerError(err error) bool {
 }
 
 func isActiveDeploymentConflict(err error) bool {
-	apiErr, ok := err.(*apiError)
-	if !ok || apiErr.Status != http.StatusConflict {
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusConflict {
 		return false
+	}
+	if apiErr.Code == "ACTIVE_DEPLOYMENT" {
+		return true
 	}
 	message := strings.ToLower(apiErr.Message)
 	return strings.Contains(message, "already active") || strings.Contains(message, "active deployment")
@@ -673,6 +725,11 @@ func resolveOrgID(token, orgFilter string) (string, error) {
 }
 
 func ensureDeployProjectBinding(token, projectDir string, cfg *deployConfigFile, opts deployOptions) error {
+	// Global projects (gpj_…) deploy to their Cell project in one region.
+	if globalID, region, ok := globalDeployTarget(token, cfg, opts); ok {
+		return bindGlobalDeployProject(token, cfg, opts, globalID, region)
+	}
+
 	orgID, err := resolveOrgID(token, opts.Org)
 	if err != nil {
 		return err
@@ -708,6 +765,11 @@ func ensureDeployProjectBinding(token, projectDir string, cfg *deployConfigFile,
 			cfg.Project.Region = matched.Region.ID
 			return nil
 		}
+		if strings.HasPrefix(requestedProject, "prj_") {
+			if handled, err := bindGlobalChildDeployProject(token, cfg, opts, requestedProject, ""); handled || err != nil {
+				return err
+			}
+		}
 		return createProjectBinding(token, projectDir, cfg, opts, requestedProject)
 	}
 
@@ -720,6 +782,10 @@ func ensureDeployProjectBinding(token, projectDir string, cfg *deployConfigFile,
 				cfg.Project.Region = p.Region.ID
 				return nil
 			}
+		}
+		// Global projects' Cell projects are not in the project list.
+		if handled, err := bindGlobalChildDeployProject(token, cfg, opts, projectID, cfg.Project.Region); handled || err != nil {
+			return err
 		}
 		cfg.Project.ID = ""
 	}
@@ -749,6 +815,9 @@ func ensureDeployProjectBinding(token, projectDir string, cfg *deployConfigFile,
 }
 
 func createProjectBinding(token, projectDir string, cfg *deployConfigFile, opts deployOptions, requestedName string) error {
+	if opts.PlanOnly {
+		return errPlanNeedsNewProject
+	}
 	regions, err := fetchRegions(token)
 	if err != nil {
 		return err
@@ -1209,8 +1278,17 @@ func generateLocalImageTag(buildID string) string {
 	return "hubfly-local:" + tag
 }
 
-func buildLocalImage(projectDir, dockerfilePath, localTag string, cfg deployConfigFile) error {
+func buildLocalImage(ctx context.Context, projectDir, dockerfilePath, localTag string, cfg deployConfigFile) error {
 	contextPath := filepath.Join(projectDir, cfg.Build.ContextDir)
+	ignoreDockerfile := dockerfilePath
+	if !filepath.IsAbs(ignoreDockerfile) {
+		ignoreDockerfile = filepath.Join(projectDir, ignoreDockerfile)
+	}
+	removeIgnore, err := applyHubflyIgnore(contextPath, ignoreDockerfile)
+	if err != nil {
+		return err
+	}
+	defer removeIgnore()
 	args := []string{"build", "-f", dockerfilePath, "-t", localTag}
 
 	secretFiles, cleanup, err := writeBuildSecretFiles(cfg.Env)
@@ -1239,7 +1317,8 @@ func buildLocalImage(projectDir, dockerfilePath, localTag string, cfg deployConf
 
 	args = append(args, contextPath)
 
-	cmd := exec.Command("docker", args...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.WaitDelay = 10 * time.Second
 	cmd.Dir = projectDir
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -1292,21 +1371,100 @@ func estimateLocalImageSize(localTag string) int64 {
 }
 
 func waitForDeploySession(token, buildID string) (deploySessionStatusResponse, error) {
-	deadline := time.Now().Add(20 * time.Minute)
+	return waitForDeploySessionContext(context.Background(), token, buildID)
+}
+
+// deployEventKey identifies an event so re-fetching the full list after a
+// reconnect prints each line exactly once, in server order.
+func deployEventKey(createdAt, phase, status, message string) string {
+	return createdAt + "\x00" + phase + "\x00" + status + "\x00" + message
+}
+
+// printNewDeployEvents prints events not printed yet and returns how many it printed.
+func printNewDeployEvents(token, buildID string, seen map[string]bool) int {
+	events, err := fetchDeploySessionEvents(token, buildID)
+	if err != nil {
+		debugf("deploy events fetch failed: %v", err)
+		return 0
+	}
+	printed := 0
+	for _, event := range events.Events {
+		key := deployEventKey(event.CreatedAt, event.Phase, event.Status, event.Message)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		printed++
+		stamp := event.CreatedAt
+		if parsed, parseErr := time.Parse(time.RFC3339Nano, event.CreatedAt); parseErr == nil {
+			stamp = parsed.Local().Format("15:04:05")
+		}
+		line := fmt.Sprintf("  %s  %-12s %s", stamp, event.Phase, strings.TrimSpace(event.Message))
+		if code := strings.TrimSpace(event.ErrorCode); code != "" {
+			line += " [" + code + "]"
+		}
+		fmt.Println(line)
+	}
+	return printed
+}
+
+// waitForDeploySessionContext follows a deployment until it finishes. It
+// streams new deployment events, survives network drops (reconnecting with
+// backoff without losing events), and stops cleanly when ctx is cancelled.
+func waitForDeploySessionContext(ctx context.Context, token, buildID string) (deploySessionStatusResponse, error) {
+	deadline := time.Now().Add(30 * time.Minute)
 	const (
 		pollInterval       = 3 * time.Second
-		heartbeatInterval  = 15 * time.Second
+		heartbeatInterval  = 30 * time.Second
 		stalledDeployLimit = 10 * time.Minute
+		maxOfflineDuration = 3 * time.Minute
 	)
 	lastStatus := ""
 	lastServerUpdate := time.Time{}
 	lastProgress := time.Now()
-	lastHeartbeat := time.Time{}
+	lastHeartbeat := time.Now()
+	seenEvents := map[string]bool{}
+	failures := 0
+	var offlineSince time.Time
 
 	for {
+		if ctx.Err() != nil {
+			return deploySessionStatusResponse{}, interruptedDuringRollout(buildID)
+		}
 		status, err := fetchDeploySession(token, buildID)
 		if err != nil {
-			return deploySessionStatusResponse{}, err
+			if ctx.Err() != nil {
+				return deploySessionStatusResponse{}, interruptedDuringRollout(buildID)
+			}
+			if !isTransientDeployError(err) {
+				return deploySessionStatusResponse{}, fmt.Errorf("check deployment %s: %w", buildID, err)
+			}
+			failures++
+			if offlineSince.IsZero() {
+				offlineSince = time.Now()
+			}
+			if time.Since(offlineSince) >= maxOfflineDuration {
+				return deploySessionStatusResponse{}, &deployExitError{code: exitDeployUnknown, err: fmt.Errorf(
+					"lost contact with Hubfly for %s (%v); deployment %s may still be running. Check it with `hubfly deploy status %s`",
+					maxOfflineDuration, err, buildID, buildID,
+				)}
+			}
+			delay := deployBackoff(failures, 20*time.Second)
+			fmt.Printf("Connection to Hubfly lost (%v); reconnecting in %s...\n", err, delay.Round(time.Second))
+			if !sleepContext(ctx, delay) {
+				return deploySessionStatusResponse{}, interruptedDuringRollout(buildID)
+			}
+			continue
+		}
+		if failures > 0 {
+			fmt.Printf("Reconnected to Hubfly after %s.\n", time.Since(offlineSince).Round(time.Second))
+			failures = 0
+			offlineSince = time.Time{}
+		}
+
+		if printNewDeployEvents(token, buildID, seenEvents) > 0 {
+			lastProgress = time.Now()
+			lastHeartbeat = time.Now()
 		}
 		if status.Build.Status != lastStatus {
 			lastStatus = status.Build.Status
@@ -1321,8 +1479,13 @@ func waitForDeploySession(token, buildID string) (deploySessionStatusResponse, e
 			}
 		}
 
+		switch status.Build.Status {
+		case "success", "failed", "cancelled":
+			return status, nil
+		}
+
 		now := time.Now()
-		if lastHeartbeat.IsZero() || now.Sub(lastHeartbeat) >= heartbeatInterval {
+		if now.Sub(lastHeartbeat) >= heartbeatInterval {
 			lastHeartbeat = now
 			serverUpdate := "unknown"
 			if !lastServerUpdate.IsZero() {
@@ -1336,22 +1499,21 @@ func waitForDeploySession(token, buildID string) (deploySessionStatusResponse, e
 			)
 		}
 
-		switch status.Build.Status {
-		case "success", "failed":
-			return status, nil
-		}
-
 		if now.After(deadline) {
-			return deploySessionStatusResponse{}, fmt.Errorf("timed out waiting for deployment")
+			return deploySessionStatusResponse{}, &deployExitError{code: exitDeployUnknown, err: fmt.Errorf(
+				"timed out after 30m waiting for deployment %s (last status: %s); it may still finish. Check it with `hubfly deploy status %s`",
+				buildID, status.Build.Status, buildID,
+			)}
 		}
 		if now.Sub(lastProgress) >= stalledDeployLimit {
-			return deploySessionStatusResponse{}, fmt.Errorf(
-				"deployment made no progress for %s (last status: %s)",
-				stalledDeployLimit,
-				status.Build.Status,
-			)
+			return deploySessionStatusResponse{}, &deployExitError{code: exitDeployUnknown, err: fmt.Errorf(
+				"deployment %s made no progress for %s (last status: %s). Inspect it with `hubfly deploy events %s` or stop it with `hubfly deploy cancel %s`",
+				buildID, stalledDeployLimit, status.Build.Status, buildID, buildID,
+			)}
 		}
-		time.Sleep(pollInterval)
+		if !sleepContext(ctx, pollInterval) {
+			return deploySessionStatusResponse{}, interruptedDuringRollout(buildID)
+		}
 	}
 }
 
