@@ -44,7 +44,7 @@ func runVolumeGroup(args []string) error {
 		autoConfirm := len(rest) > 1 && (rest[1] == "--yes" || rest[1] == "-y" || rest[1] == "-f")
 		return volumeDeleteFlow(rest[0], autoConfirm)
 	default:
-		return fmt.Errorf("unknown volume command %q (available: list, create, attach, detach, resize, delete)", cmd)
+		return fmt.Errorf("unknown volume command %q (available: list, create, attach, detach, resize, delete)%s", cmd, didYouMean(cmd, []string{"list", "create", "attach", "detach", "resize", "delete"}))
 	}
 }
 
