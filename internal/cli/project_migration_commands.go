@@ -14,12 +14,44 @@ type projectMigrationView struct {
 	ID              string          `json:"id"`
 	ProjectName     string          `json:"projectName"`
 	Status          string          `json:"status"`
+	Mode            string          `json:"mode"`
+	Kind            string          `json:"kind"`
+	Target          regionRefView   `json:"target"`
+	Source          regionRefView   `json:"source"`
 	BytesTotal      int64           `json:"bytesTotal"`
 	BytesDone       int64           `json:"bytesDone"`
 	DecisionPending bool            `json:"decisionPending"`
 	CanCancel       bool            `json:"canCancel"`
+	CanMoveBack     bool            `json:"canMoveBack"`
 	Job             *projectJobView `json:"job"`
+	FailureCode     *string         `json:"failureCode"`
 	FailureMessage  *string         `json:"failureMessage"`
+	// Additive progress/failure fields (Dashboard 2026-11-11); absent on
+	// older engines, so every use tolerates nil.
+	OverallProgress    *float64                `json:"overallProgress"`
+	OverallEtaSeconds  *int64                  `json:"overallEtaSeconds"`
+	CurrentStep        *migrationStepProgress  `json:"currentStep"`
+	FailedStep         *struct{ Label string } `json:"failedStep"`
+	FailureFix         *string                 `json:"failureFix"`
+	Retryable          *bool                   `json:"retryable"`
+	DowntimeSeconds    *int64                  `json:"downtimeSeconds"`
+	DecisionDeadlineAt *string                 `json:"decisionDeadlineAt"`
+	Outcome            *string                 `json:"outcome"`
+}
+
+type regionRefView struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type migrationStepProgress struct {
+	Key              string  `json:"key"`
+	Label            string  `json:"label"`
+	Phase            string  `json:"phase"`
+	Detail           *string `json:"detail"`
+	Retries          int     `json:"retries"`
+	RemainingSeconds *int64  `json:"remainingSeconds"`
+	Stalled          bool    `json:"stalled"`
 }
 type projectMigrationPreview struct {
 	CanMigrate  bool        `json:"canMigrate"`
@@ -183,15 +215,112 @@ func projectMigrateFlow(args []string, rehome bool) error {
 
 func printProjectMigration(move projectMigrationView) {
 	_, _ = fmt.Fprintf(rtOut, "%s: %s (%s)\n", move.ProjectName, strings.ReplaceAll(move.Status, "_", " "), move.ID)
-	if move.BytesTotal > 0 {
-		_, _ = fmt.Fprintf(rtOut, "Copied %d of %d bytes.\n", move.BytesDone, move.BytesTotal)
+	if move.Target.ID != "" {
+		_, _ = fmt.Fprintf(rtOut, "Route: %s -> %s\n", regionLabel(move.Source), regionLabel(move.Target))
 	}
-	if move.Job != nil {
+	if line := migrationProgressLine(move); line != "" {
+		_, _ = fmt.Fprintln(rtOut, line)
+	} else if move.Job != nil {
 		_, _ = fmt.Fprintln(rtOut, projectJobProgress(move.Job))
 	}
-	if move.FailureMessage != nil {
-		_, _ = fmt.Fprintln(rtOut, *move.FailureMessage)
+	if move.BytesTotal > 0 {
+		_, _ = fmt.Fprintf(rtOut, "Copied %s of %s.\n", formatMigrationBytes(move.BytesDone), formatMigrationBytes(move.BytesTotal))
 	}
+	if move.DowntimeSeconds != nil {
+		_, _ = fmt.Fprintf(rtOut, "Downtime: %s\n", time.Duration(*move.DowntimeSeconds)*time.Second)
+	}
+	if text := migrationFailureText(move); text != "" {
+		_, _ = fmt.Fprintln(rtOut, text)
+	}
+}
+
+func regionLabel(r regionRefView) string {
+	if r.Name != "" {
+		return r.Name
+	}
+	return r.ID
+}
+
+func formatMigrationBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// migrationProgressLine is one line of live progress: overall percent, the
+// current step with its detail and retries, and the ETA. Empty on engines
+// without the progress fields.
+func migrationProgressLine(move projectMigrationView) string {
+	parts := []string{}
+	if move.OverallProgress != nil {
+		parts = append(parts, fmt.Sprintf("%3.0f%%", *move.OverallProgress*100))
+	}
+	if step := move.CurrentStep; step != nil && step.Label != "" {
+		label := step.Label
+		if step.Phase == "compensation" {
+			label = "rolling back: " + label
+		}
+		if move.Job != nil && move.Job.StepCount > 0 {
+			label = fmt.Sprintf("step %d/%d %s", move.Job.StepIndex+1, move.Job.StepCount, label)
+		}
+		if step.Detail != nil && *step.Detail != "" {
+			label += " (" + *step.Detail + ")"
+		}
+		if step.Retries > 0 {
+			label += fmt.Sprintf(" [retry %d]", step.Retries)
+		}
+		if step.Stalled {
+			label += " [stalled]"
+		}
+		parts = append(parts, label)
+	}
+	if move.OverallEtaSeconds != nil && *move.OverallEtaSeconds > 0 {
+		parts = append(parts, "ETA "+(time.Duration(*move.OverallEtaSeconds)*time.Second).String())
+	}
+	if move.DecisionPending {
+		parts = append(parts, "waiting for your decision")
+	}
+	return strings.Join(parts, " · ")
+}
+
+// migrationFailureText explains a failed move: which step, why, what to do.
+func migrationFailureText(move projectMigrationView) string {
+	if move.FailureMessage == nil && move.FailureFix == nil && move.FailedStep == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Failed")
+	if move.FailedStep != nil && move.FailedStep.Label != "" {
+		b.WriteString(" at: " + move.FailedStep.Label)
+	}
+	if move.FailureMessage != nil {
+		b.WriteString("\nReason: " + *move.FailureMessage)
+	}
+	if move.FailureCode != nil && *move.FailureCode != "" {
+		b.WriteString(" (" + *move.FailureCode + ")")
+	}
+	if move.Outcome != nil {
+		switch *move.Outcome {
+		case "stayed_in_source":
+			b.WriteString("\nYour project still runs in " + regionLabel(move.Source) + ".")
+		case "needs_operator":
+			b.WriteString("\nHubfly support has been alerted; no action is needed from you.")
+		}
+	}
+	if move.FailureFix != nil && *move.FailureFix != "" {
+		b.WriteString("\nFix: " + *move.FailureFix)
+	}
+	if move.Retryable != nil && *move.Retryable {
+		b.WriteString("\nRetry with: hubfly project migration retry " + move.ProjectName)
+	}
+	return b.String()
 }
 
 func migrationTerminalError(move projectMigrationView) (bool, error) {
@@ -199,47 +328,118 @@ func migrationTerminalError(move projectMigrationView) (bool, error) {
 	case "completed":
 		return true, nil
 	case "failed", "rolled_back", "canceled", "needs_attention":
-		message := move.Status
+		message := strings.ReplaceAll(move.Status, "_", " ")
 		if move.FailureMessage != nil {
 			message = *move.FailureMessage
 		}
-		return true, fmt.Errorf("migration %s: %s", move.ID, message)
+		if move.FailureFix != nil && *move.FailureFix != "" {
+			message += ". " + *move.FailureFix
+		}
+		if move.Retryable != nil && *move.Retryable {
+			message += "\nRetry with: hubfly project migration retry " + move.ProjectName
+		}
+		return true, fmt.Errorf("migration %s %s: %s", move.ID, strings.ReplaceAll(move.Status, "_", " "), message)
 	case "awaiting_decision":
-		return true, errors.New("the move is waiting for your decision: use project migration continue freeze-now|keep-syncing|cancel <project>")
+		return true, errors.New("the move is waiting for your decision: use hubfly project migration continue freeze-now|keep-syncing|cancel " + move.ProjectName)
 	}
 	return false, nil
 }
 
+// waitForProjectMigration polls the move until it ends, printing a progress
+// line to stderr whenever it changes (a carriage-return line on a terminal).
+// Transient API or network errors are retried with backoff, so a dropped
+// connection or laptop sleep does not end the watch; the move itself keeps
+// running server-side either way.
 func waitForProjectMigration(token, projectID, migrationID string, timeout time.Duration, quiet bool) (projectMigrationView, json.RawMessage, error) {
 	deadline := time.Now().Add(timeout)
+	interval := rtPollInterval
+	if interval <= 0 || interval > 5*time.Second {
+		interval = 5 * time.Second
+	}
+	live := !quiet && rtStderrIsTerminal()
+	lastLine := ""
+	failures := 0
+	var last projectMigrationView
+	var lastRaw json.RawMessage
+	defer func() {
+		if live && lastLine != "" {
+			_, _ = fmt.Fprintln(rtErr)
+		}
+	}()
 	for {
 		var move projectMigrationView
 		raw, err := projectMovesCall(http.MethodGet, projectMovesProjectPath(projectID, "/migration"), token, nil, &move)
 		if err != nil {
-			return move, raw, projectMovesAPIError(err, "/projects/"+projectID)
+			var apiErr *apiError
+			permanent := errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 && apiErr.Status != 408 && apiErr.Status != 429
+			failures++
+			if permanent || failures > 30 || time.Now().After(deadline) {
+				return last, lastRaw, fmt.Errorf("%w\nThe migration keeps running. Resume watching with: hubfly project migration watch <project>", projectMovesAPIError(err, "/projects/"+projectID))
+			}
+			backoff := min(time.Duration(failures)*interval, time.Minute)
+			if !quiet {
+				if live && lastLine != "" {
+					_, _ = fmt.Fprintln(rtErr)
+					lastLine = ""
+				}
+				_, _ = fmt.Fprintf(rtErr, "Connection problem (%v); retrying in %s...\n", err, backoff)
+			}
+			time.Sleep(backoff)
+			continue
+		}
+		failures = 0
+		last, lastRaw = move, raw
+		if migrationID == "" {
+			migrationID = move.ID
 		}
 		if move.ID != migrationID {
 			return move, raw, errors.New("the current migration changed; inspect project history")
 		}
+		if !quiet {
+			line := migrationProgressLine(move)
+			if line == "" {
+				line = fmt.Sprintf("%s · %s", strings.ReplaceAll(move.Status, "_", " "), projectJobProgress(move.Job))
+				if move.BytesTotal > 0 {
+					line += fmt.Sprintf(" · %s/%s", formatMigrationBytes(move.BytesDone), formatMigrationBytes(move.BytesTotal))
+				}
+			}
+			if line != lastLine {
+				if live {
+					_, _ = fmt.Fprintf(rtErr, "\r\033[2K%s", line)
+				} else {
+					_, _ = fmt.Fprintln(rtErr, line)
+				}
+				lastLine = line
+			}
+		}
 		if done, terminalErr := migrationTerminalError(move); done {
 			return move, raw, terminalErr
 		}
-		if !quiet {
-			_, _ = fmt.Fprintf(rtErr, "%s: %s · %d/%d bytes\n", move.ID, move.Status, move.BytesDone, move.BytesTotal)
-		}
 		if time.Now().After(deadline) {
-			return move, raw, errors.New("timed out waiting; the migration keeps running. Use project migration status <project>")
+			return move, raw, errors.New("timed out waiting; the migration keeps running. Resume with: hubfly project migration watch " + move.ProjectName)
 		}
-		time.Sleep(5 * time.Second)
+		time.Sleep(interval)
 	}
 }
 
+const projectMigrationGroupUsage = "usage: hubfly project migration status|watch|retry|cancel|continue|move-back|dns|attestation <project> [--wait] [--json]"
+
+var projectMigrationActions = []string{"status", "watch", "retry", "cancel", "continue", "move-back", "dns", "attestation"}
+
 func runProjectMigrationGroup(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: hubfly project migration status|cancel|continue|move-back|dns|attestation <project>")
+		return errors.New(projectMigrationGroupUsage)
 	}
 	action := args[0]
 	rest := args[1:]
+	if action == "retry" {
+		return projectMigrationRetry(rest)
+	}
+	if action == "watch" {
+		// watch = status --wait: re-attach to a running move after a
+		// disconnect, closed terminal or timeout.
+		action, rest = "status", append([]string{"--wait"}, rest...)
+	}
 	decision := ""
 	if action == "continue" {
 		if len(rest) == 0 {
@@ -254,7 +454,7 @@ func runProjectMigrationGroup(args []string) error {
 	switch action {
 	case "status", "cancel", "continue", "move-back", "dns", "attestation":
 	default:
-		return fmt.Errorf("unknown project migration command %q", action)
+		return unknownCommandError("project migration", action, projectMigrationActions)
 	}
 	fs := newProjectFlags("migration " + action)
 	asJSON := fs.Bool("json", false, "")
@@ -340,6 +540,12 @@ func runProjectMigrationGroup(args []string) error {
 		return projectMovesAPIError(err, "/projects/"+target.ID)
 	}
 	if *wait && action != "dns" && action != "attestation" {
+		if result.ID == "" {
+			return fmt.Errorf("project '%s' has no region move to watch. Start one with: hubfly project migrate %s --region <id>", target.Name, target.Name)
+		}
+		if action == "status" && !*asJSON {
+			_, _ = fmt.Fprintf(rtErr, "Watching %s (Ctrl+C stops watching; the move continues).\n", result.ID)
+		}
 		result, raw, err = waitForProjectMigration(token, target.ID, result.ID, *timeout, *asJSON)
 	}
 	if *asJSON || action == "dns" || action == "attestation" {
@@ -352,4 +558,51 @@ func runProjectMigrationGroup(args []string) error {
 		printProjectMigration(result)
 	}
 	return err
+}
+
+// projectMigrationRetry starts a new move to the region and mode of the
+// project's last move, after that move failed, rolled back or was canceled.
+// Extra flags (--yes, --confirm-name, --wait, --json, --timeout, --at,
+// --max-freeze, --mode) pass through to migrate.
+func projectMigrationRetry(args []string) error {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return errors.New("usage: hubfly project migration retry <project> [--wait] [--yes --confirm-name <name>] [--json]")
+	}
+	token, err := ensureAuth(true)
+	if err != nil {
+		return err
+	}
+	target, err := resolveMoveProject(token, args[0])
+	if err != nil {
+		return err
+	}
+	var last projectMigrationView
+	if _, err := projectMovesCall(http.MethodGet, projectMovesProjectPath(target.ID, "/migration"), token, nil, &last); err != nil {
+		return projectMovesAPIError(err, "/projects/"+target.ID)
+	}
+	if last.ID == "" || last.Target.ID == "" {
+		return fmt.Errorf("project '%s' has no earlier region move to retry. Start one with: hubfly project migrate %s --region <id>", target.Name, target.Name)
+	}
+	switch last.Status {
+	case "failed", "rolled_back", "canceled":
+	case "completed":
+		return fmt.Errorf("the last move of '%s' completed; nothing to retry", target.Name)
+	default:
+		return fmt.Errorf("the move %s is still %s; watch it with: hubfly project migration watch %s", last.ID, strings.ReplaceAll(last.Status, "_", " "), target.Name)
+	}
+	if last.Retryable != nil && !*last.Retryable {
+		msg := "the last move failed for a reason a retry will not fix"
+		if last.FailureFix != nil && *last.FailureFix != "" {
+			msg += ": " + *last.FailureFix
+		}
+		return errors.New(msg)
+	}
+	mode := last.Mode
+	if mode != "cold" && mode != "warm" {
+		mode = "warm"
+	}
+	forwarded := []string{target.Name, "--region", last.Target.ID, "--mode", mode}
+	forwarded = append(forwarded, args[1:]...)
+	_, _ = fmt.Fprintf(rtErr, "Retrying the move of %s to %s (%s).\n", target.Name, regionLabel(last.Target), mode)
+	return projectMigrateFlow(forwarded, last.Kind == "rehome")
 }
