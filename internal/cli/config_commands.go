@@ -48,7 +48,7 @@ func configFlow(args []string) error {
 		return fmt.Errorf("unsupported config schema version %d", cfg.Version)
 	}
 	backup := fmt.Sprintf("%s.v1.%s.bak", path, time.Now().UTC().Format("20060102T150405Z"))
-	if err := os.WriteFile(backup, payload, 0o600); err != nil {
+	if err := WriteFileAtomic(backup, payload, 0o600); err != nil {
 		return fmt.Errorf("create migration backup: %w", err)
 	}
 	cfg.Version = 2
