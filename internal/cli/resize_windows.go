@@ -4,7 +4,9 @@ package cli
 
 import (
 	"os"
+	"os/signal"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/websocket"
@@ -21,4 +23,14 @@ func watchResize(conn *websocket.Conn, authenticated *atomic.Bool, done <-chan s
 	}, func(cols, rows int) error {
 		return sendTerminalMessage(conn, terminalClientMessage{Type: "resize", Rows: rows, Cols: cols})
 	})
+}
+
+// notifyTerminalSignals routes termination signals to an interactive session
+// so it restores the terminal and exits with 130 instead of dying raw.
+func notifyTerminalSignals(c chan<- os.Signal) {
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+}
+
+func stopTerminalSignals(c chan os.Signal) {
+	signal.Stop(c)
 }
