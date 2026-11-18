@@ -50,7 +50,7 @@ func runContainerGroup(args []string) error {
 		if len(rest) < 1 {
 			return errors.New("usage: hubfly container logs <containerIdOrName> [--follow|-f]")
 		}
-		return logsFlow(rest[0], len(rest) > 1 && (rest[1] == "--follow" || rest[1] == "-f"))
+		return containerLogsFlow(rest[0], len(rest) > 1 && (rest[1] == "--follow" || rest[1] == "-f"))
 	case "ssh":
 		if len(rest) == 1 {
 			return sshFlow(rest[0])
@@ -72,7 +72,7 @@ func runContainerGroup(args []string) error {
 	default:
 		// If the first argument is not a known subcommand but might be a container name,
 		// and there are 2 args, check if the second is logs/ssh/exec
-		return fmt.Errorf("unknown container command %q (available: list, inspect, start, stop, restart, delete, logs, ssh, exec, tunnel)", command)
+		return fmt.Errorf("unknown container command %q (available: list, inspect, start, stop, restart, delete, logs, ssh, exec, tunnel)%s", command, didYouMean(command, []string{"list", "inspect", "start", "stop", "restart", "delete", "logs", "ssh", "exec", "tunnel"}))
 	}
 }
 
@@ -349,4 +349,178 @@ func containerDeleteFlow(containerIDOrName string, autoConfirm bool) error {
 
 	fmt.Printf("Container '%s' (%s) deleted successfully.\n", c.Name, c.ID)
 	return nil
+}
+
+// Exit codes for container runtime refusals (logs, stats, exec). 2-7 are the
+// shared codes in exitCodeForError; an UPSTREAM_TIMEOUT keeps 6 (timeout).
+const (
+	exitContainerNotRunning  = 8 // stopped, sleeping, or no runtime in its region
+	exitContainerRegionDown  = 9 // the container's region is temporarily unreachable
+	defaultRegionRetryAfter  = 15 * time.Second
+	maxRegionRetryAfter      = 5 * time.Minute
+	containerRuntimeTimeout  = "UPSTREAM_TIMEOUT"
+	containerRegionDown      = "REGION_UNAVAILABLE"
+	containerNotRunning      = "CONTAINER_NOT_RUNNING"
+	containerSleeping        = "CONTAINER_SLEEPING"
+	containerRuntimeMissing  = "runtime_missing"
+	containerStoppedFollowUp = "start it with 'hubfly container start %s'"
+)
+
+// containerRuntimeError is the friendly form of the engine's precise container
+// runtime errors. Unwrap keeps the *apiError reachable for callers.
+type containerRuntimeError struct {
+	code       string
+	message    string
+	exitCode   int
+	retryAfter time.Duration
+	err        error
+}
+
+func (e *containerRuntimeError) Error() string { return e.message }
+func (e *containerRuntimeError) Unwrap() error { return e.err }
+func (e *containerRuntimeError) ExitCode() int { return e.exitCode }
+
+func apiErrorDetail(apiErr *apiError, key string) any {
+	details, ok := apiErr.Details.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return details[key]
+}
+
+// regionRetryAfter reads details.retryAfterSeconds, falling back to 15s.
+func regionRetryAfter(apiErr *apiError) time.Duration {
+	if seconds, ok := apiErrorDetail(apiErr, "retryAfterSeconds").(float64); ok && seconds > 0 {
+		wait := time.Duration(seconds * float64(time.Second))
+		if wait > maxRegionRetryAfter {
+			return maxRegionRetryAfter
+		}
+		return wait
+	}
+	return defaultRegionRetryAfter
+}
+
+// friendlyContainerRuntimeError maps CONTAINER_NOT_RUNNING, CONTAINER_SLEEPING,
+// REGION_UNAVAILABLE and UPSTREAM_TIMEOUT to a clear message and exit code.
+// Any other error is returned unchanged. operation is e.g. "logs", "stats".
+func friendlyContainerRuntimeError(err error, container, operation string) error {
+	var apiErr *apiError
+	if err == nil || !errors.As(err, &apiErr) {
+		return err
+	}
+	out := &containerRuntimeError{code: apiErr.Code, err: err}
+	switch apiErr.Code {
+	case containerNotRunning:
+		out.exitCode = exitContainerNotRunning
+		if apiErrorDetail(apiErr, "reason") == containerRuntimeMissing {
+			out.message = fmt.Sprintf("container %s has no runtime in its region, so %s are unavailable; start or redeploy it ('hubfly container start %s')", container, operation, container)
+		} else {
+			out.message = fmt.Sprintf("container %s is stopped, so %s are unavailable; "+containerStoppedFollowUp, container, operation, container)
+		}
+	case containerSleeping:
+		out.exitCode = exitContainerNotRunning
+		out.message = fmt.Sprintf("container %s is sleeping; it wakes on the next request (or "+containerStoppedFollowUp+")", container, container)
+	case containerRegionDown:
+		out.exitCode = exitContainerRegionDown
+		out.retryAfter = regionRetryAfter(apiErr)
+		out.message = fmt.Sprintf("the region hosting container %s is temporarily unavailable; try again in %s", container, out.retryAfter.Round(time.Second))
+	case containerRuntimeTimeout:
+		out.exitCode = 6
+		out.message = fmt.Sprintf("the region hosting container %s did not answer the %s request in time; try again", container, operation)
+	default:
+		return err
+	}
+	return out
+}
+
+// containerRuntimeRetryWait is how long a --follow loop waits before trying
+// again after err, or false when err should end the command.
+func containerRuntimeRetryWait(err error) (time.Duration, bool) {
+	var runtimeErr *containerRuntimeError
+	if !errors.As(err, &runtimeErr) {
+		return 0, false
+	}
+	switch runtimeErr.code {
+	case containerRegionDown:
+		return runtimeErr.retryAfter, true
+	case containerRuntimeTimeout:
+		return 5 * time.Second, true
+	}
+	return 0, false
+}
+
+// sleepUnlessInterrupted waits d, returning false if Ctrl-C came first.
+func sleepUnlessInterrupted(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-RootContext().Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// containerLogsFlow prints a container's logs; with follow it polls and, when
+// the region is unavailable or slow, waits (honoring retryAfterSeconds) and
+// resumes instead of exiting.
+func containerLogsFlow(containerIDOrName string, follow bool) error {
+	token, err := ensureAuth(true)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "Searching for container '%s'...\n", containerIDOrName)
+	c, projectID, err := findContainer(token, containerIDOrName)
+	if err != nil {
+		return err
+	}
+
+	if !follow {
+		logs, err := fetchContainerLogs(token, projectID, c.ID)
+		if err != nil {
+			return friendlyContainerRuntimeError(err, c.Name, "logs")
+		}
+		if logs.Stdout != "" {
+			fmt.Println("--- STDOUT ---")
+			fmt.Print(logs.Stdout)
+		}
+		if logs.Stderr != "" {
+			fmt.Println("--- STDERR ---")
+			fmt.Print(logs.Stderr)
+		}
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Streaming logs for container %s (%s) [Ctrl+C to stop]...\n", c.Name, c.ID)
+	var lastStdout, lastStderr string
+	for {
+		logs, err := fetchContainerLogs(token, projectID, c.ID)
+		if err != nil {
+			if RootContext().Err() != nil {
+				return nil
+			}
+			friendly := friendlyContainerRuntimeError(err, c.Name, "logs")
+			wait, retry := containerRuntimeRetryWait(friendly)
+			if !retry {
+				return friendly
+			}
+			fmt.Fprintf(os.Stderr, "%s — retrying in %s...\n", friendly, wait.Round(time.Second))
+			if !sleepUnlessInterrupted(wait) {
+				return nil
+			}
+			continue
+		}
+		if len(logs.Stdout) > len(lastStdout) {
+			fmt.Print(logs.Stdout[len(lastStdout):])
+			lastStdout = logs.Stdout
+		}
+		if len(logs.Stderr) > len(lastStderr) {
+			fmt.Fprint(os.Stderr, logs.Stderr[len(lastStderr):])
+			lastStderr = logs.Stderr
+		}
+		if !sleepUnlessInterrupted(2 * time.Second) {
+			return nil
+		}
+	}
 }
