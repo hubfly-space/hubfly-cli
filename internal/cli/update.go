@@ -4,12 +4,16 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -78,15 +82,30 @@ func updateFlow(checkOnly bool) error {
 		exePath = filepath.Clean(exePath)
 	}
 
-	newBinary, err := downloadAndExtractBinary(assetURL)
+	checksum, err := fetchReleaseChecksum(rel, assetName)
+	if err != nil {
+		return err
+	}
+
+	newBinary, err := downloadAndExtractVerifiedBinary(assetURL, checksum, []string{"hubfly", "hubfly-cli", "hubfly.exe"})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(filepath.Dir(newBinary)) }()
 
-	if err := replaceExecutable(exePath, newBinary); err != nil {
+	backupPath, err := swapExecutable(exePath, newBinary)
+	if err != nil {
 		return err
 	}
+	if verifyErr := verifyInstalledExecutable(exePath); verifyErr != nil {
+		if rollbackErr := rollbackExecutable(exePath, backupPath); rollbackErr != nil {
+			return fmt.Errorf("update failed (%v) and rollback failed: %w; the previous binary is at %s", verifyErr, rollbackErr, backupPath)
+		}
+		return fmt.Errorf("update failed and was rolled back to %s: %w", version.Version, verifyErr)
+	}
+	// On Windows the running executable (now the backup) stays locked until
+	// exit; the next update removes it.
+	_ = os.Remove(backupPath)
 
 	fmt.Println("Update successful. Re-run `hubfly version` to confirm.")
 	return nil
@@ -100,22 +119,26 @@ func fetchLatestReleaseForRepo(owner, repo string) (githubRelease, error) {
 	var rel githubRelease
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	ctx, cancel := RequestContext(20 * time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return rel, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "hubfly-cli/"+version.Version)
 
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := DoHTTP(req)
 	if err != nil {
 		return rel, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0" {
+			return rel, errors.New("GitHub API rate limit reached; try again later")
+		}
 		return rel, fmt.Errorf("github API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
@@ -167,22 +190,74 @@ func downloadAndExtractBinary(assetURL string) (string, error) {
 }
 
 func downloadAndExtractNamedBinary(assetURL string, binaryCandidates []string) (string, error) {
-	req, err := http.NewRequest(http.MethodGet, assetURL, nil)
+	return downloadAndExtractVerifiedBinary(assetURL, "", binaryCandidates)
+}
+
+// fetchReleaseChecksum reads the release's "<asset>.sha256" file
+// ("<hex>  <name>") and returns the lowercase hex digest.
+func fetchReleaseChecksum(rel githubRelease, assetName string) (string, error) {
+	checksumURL, err := findAssetURL(rel, assetName+".sha256")
+	if err != nil {
+		return "", fmt.Errorf("release %s publishes no checksum for %s; refusing to install an unverified binary", rel.TagName, assetName)
+	}
+	ctx, cancel := RequestContext(30 * time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "hubfly-cli/"+version.Version)
+	resp, err := DoHTTP(req)
+	if err != nil {
+		return "", fmt.Errorf("download checksum: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return "", fmt.Errorf("download checksum: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download checksum failed with %d", resp.StatusCode)
+	}
+	return parseChecksumFile(string(body))
+}
+
+func parseChecksumFile(content string) (string, error) {
+	fields := strings.Fields(content)
+	if len(fields) == 0 {
+		return "", errors.New("checksum file is empty")
+	}
+	sum := strings.ToLower(fields[0])
+	if len(sum) != 64 {
+		return "", errors.New("checksum file is malformed")
+	}
+	if _, err := hex.DecodeString(sum); err != nil {
+		return "", errors.New("checksum file is malformed")
+	}
+	return sum, nil
+}
+
+// downloadAndExtractVerifiedBinary downloads assetURL (retrying transient
+// failures), checks its SHA-256 against expectedSHA256 when given, and
+// extracts the first matching binary into a fresh temp dir.
+func downloadAndExtractVerifiedBinary(assetURL, expectedSHA256 string, binaryCandidates []string) (string, error) {
+	ctx, cancel := context.WithTimeout(RootContext(), RequestTimeout(10*time.Minute))
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Accept", "application/octet-stream")
 	req.Header.Set("User-Agent", "hubfly-cli/"+version.Version)
 
-	client := &http.Client{Timeout: 2 * time.Minute}
-	resp, err := client.Do(req)
+	resp, err := DoHTTP(req)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", fmt.Errorf("download failed with %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
@@ -203,12 +278,18 @@ func downloadAndExtractNamedBinary(assetURL string, binaryCandidates []string) (
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	hasher := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(f, hasher), resp.Body); err != nil {
 		_ = f.Close()
-		return "", err
+		return "", fmt.Errorf("download interrupted: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		return "", err
+	}
+	if expected := strings.ToLower(strings.TrimSpace(expectedSHA256)); expected != "" {
+		if actual := hex.EncodeToString(hasher.Sum(nil)); actual != expected {
+			return "", fmt.Errorf("checksum mismatch for downloaded release (expected %s, got %s); nothing was installed", expected, actual)
+		}
 	}
 
 	outputName := "binary"
@@ -347,6 +428,19 @@ func extractBinaryFromZipByNames(archivePath, outputPath string, binaryCandidate
 }
 
 func replaceExecutable(currentPath, newBinaryPath string) error {
+	backupPath, err := swapExecutable(currentPath, newBinaryPath)
+	if err != nil {
+		return err
+	}
+	_ = os.Remove(backupPath)
+	return nil
+}
+
+// swapExecutable stages newBinaryPath next to currentPath, then swaps it in
+// with two renames, keeping the old binary at the returned backup path. A
+// failed swap puts the old binary back. Windows permits renaming the running
+// executable but keeps it locked until exit.
+func swapExecutable(currentPath, newBinaryPath string) (string, error) {
 	dir := filepath.Dir(currentPath)
 	stagedPath := filepath.Join(dir, ".hubfly.new")
 	backupPath := filepath.Join(dir, ".hubfly.old")
@@ -357,37 +451,75 @@ func replaceExecutable(currentPath, newBinaryPath string) error {
 
 	in, err := os.Open(newBinaryPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = in.Close() }()
 
 	out, err := os.OpenFile(stagedPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
 	if err != nil {
-		return fmt.Errorf("cannot write update to %s: %w", stagedPath, err)
+		return "", fmt.Errorf("cannot write update to %s: %w", stagedPath, err)
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()
-		return err
+		_ = os.Remove(stagedPath)
+		return "", err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		_ = os.Remove(stagedPath)
+		return "", err
 	}
 	if err := out.Close(); err != nil {
-		return err
+		_ = os.Remove(stagedPath)
+		return "", err
 	}
 
-	// Windows permits renaming the running executable, but keeps it locked until
-	// exit. A previous update's backup must be removable before replacing it.
+	// A previous update's backup must be removable before replacing it.
 	if err := os.Remove(backupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		_ = os.Remove(stagedPath)
-		return fmt.Errorf("cannot remove previous update backup: %w", err)
+		return "", fmt.Errorf("cannot remove previous update backup: %w", err)
 	}
 	if err := os.Rename(currentPath, backupPath); err != nil {
 		_ = os.Remove(stagedPath)
-		return fmt.Errorf("cannot replace %s (try with proper permissions): %w", currentPath, err)
+		return "", fmt.Errorf("cannot replace %s (try with proper permissions): %w", currentPath, err)
 	}
 	if err := os.Rename(stagedPath, currentPath); err != nil {
 		_ = os.Rename(backupPath, currentPath)
 		_ = os.Remove(stagedPath)
-		return fmt.Errorf("failed to finalize update: %w", err)
+		return "", fmt.Errorf("failed to finalize update: %w", err)
 	}
-	_ = os.Remove(backupPath)
+	return backupPath, nil
+}
+
+// rollbackExecutable restores backupPath over currentPath.
+func rollbackExecutable(currentPath, backupPath string) error {
+	failedPath := filepath.Join(filepath.Dir(currentPath), ".hubfly.failed")
+	if runtime.GOOS == "windows" {
+		failedPath += ".exe"
+	}
+	_ = os.Remove(failedPath)
+	if err := os.Rename(currentPath, failedPath); err != nil {
+		return err
+	}
+	if err := os.Rename(backupPath, currentPath); err != nil {
+		_ = os.Rename(failedPath, currentPath)
+		return err
+	}
+	_ = os.Remove(failedPath)
+	return nil
+}
+
+// verifyInstalledExecutable runs `<path> version` to prove the new binary
+// starts on this machine before the old one is discarded.
+func verifyInstalledExecutable(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, path, "version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("new binary failed to start: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	if !strings.Contains(string(output), "hubfly version") {
+		return fmt.Errorf("new binary printed unexpected version output: %s", strings.TrimSpace(string(output)))
+	}
 	return nil
 }
