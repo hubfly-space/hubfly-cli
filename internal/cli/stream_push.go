@@ -33,7 +33,7 @@ import (
 var (
 	streamLookPath    = exec.LookPath
 	streamPushContext = func() (context.Context, context.CancelFunc) {
-		return signal.NotifyContext(context.Background(), os.Interrupt)
+		return signal.NotifyContext(RootContext(), os.Interrupt)
 	}
 	streamGOOS = runtime.GOOS
 	// Ports and transport of the stream server; tests point them at local
