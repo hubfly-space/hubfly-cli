@@ -31,3 +31,13 @@ func watchResize(conn *websocket.Conn, authenticated *atomic.Bool, done <-chan s
 		}
 	}
 }
+
+// notifyTerminalSignals routes termination signals to an interactive session
+// so it restores the terminal and exits with 130 instead of dying raw.
+func notifyTerminalSignals(c chan<- os.Signal) {
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+}
+
+func stopTerminalSignals(c chan os.Signal) {
+	signal.Stop(c)
+}
