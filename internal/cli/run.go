@@ -15,6 +15,11 @@ func Run(args []string) int {
 	args = configureDebug(args)
 	debugf("debug mode enabled")
 	if err := run(args); err != nil {
+		// A remote command's own exit status: it already printed its output.
+		var remote *remoteExitError
+		if errors.As(err, &remote) {
+			return remote.code
+		}
 		fmt.Fprintln(os.Stderr, err)
 		return exitCodeForError(err)
 	}
@@ -22,6 +27,12 @@ func Run(args []string) int {
 }
 
 func exitCodeForError(err error) int {
+	// Commands with documented, specific exit codes (for example deploy's
+	// build/upload/rollout failures) carry them on the error itself.
+	var coded interface{ ExitCode() int }
+	if errors.As(err, &coded) && coded.ExitCode() > 0 {
+		return coded.ExitCode()
+	}
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
 		if apiErr.Status == 401 || apiErr.Status == 403 {
@@ -106,13 +117,17 @@ func run(args []string) error {
 		return runDBGroup(args[1:])
 	case "storage":
 		return runStorageGroup(args[1:])
+	case "mail":
+		return runMailGroup(args[1:])
 	case "analytics":
 		return runAnalyticsGroup(args[1:])
+	case "domains", "domain":
+		return runDomainsGroup(args[1:])
 	case "logs":
 		if len(args) < 2 {
 			return errors.New("usage: hubfly logs <containerIdOrName> [--follow|-f]")
 		}
-		return logsFlow(args[1], len(args) > 2 && (args[2] == "--follow" || args[2] == "-f"))
+		return containerLogsFlow(args[1], len(args) > 2 && (args[2] == "--follow" || args[2] == "-f"))
 	case "ssh":
 		return runLegacyExecCommand("ssh", args[1:])
 	case "exec":
@@ -146,9 +161,16 @@ func run(args []string) error {
 		printUsage()
 		return nil
 	default:
-		printUsage()
-		return fmt.Errorf("unknown command: %s", args[0])
+		return unknownCommandError("", args[0], topLevelCommands)
 	}
+}
+
+// topLevelCommands feeds "did you mean" suggestions for mistyped commands.
+var topLevelCommands = []string{
+	"auth", "login", "logout", "whoami", "projects", "orgs", "project", "container", "vm",
+	"start", "stop", "restart", "stats", "env", "volume", "stream", "realtime", "db",
+	"storage", "analytics", "mail", "domains", "logs", "ssh", "exec", "tunnel", "stack", "build",
+	"deploy", "compose", "config", "update", "version", "help",
 }
 
 func parseOrgFilter(args []string) (string, error) {
@@ -388,6 +410,16 @@ func printUsage() {
 	fmt.Println("  hubfly analytics realtime <site> [--watch] | export <site> --from <date> --to <date>")
 	fmt.Println("  hubfly analytics usage [<project>] | keys [list|create|revoke] <site>")
 	fmt.Println("")
+	fmt.Println("Mail (details: hubfly mail help):")
+	fmt.Println("  hubfly mail domains [list|status <domain> [--check]]")
+	fmt.Println("  hubfly mail plan [show|change] <domain> [--plan <name>]")
+	fmt.Println("  hubfly mail send-test --from <address> --to <address>")
+	fmt.Println("")
+	fmt.Println("Custom domains:")
+	fmt.Println("  hubfly domains list [--json]")
+	fmt.Println("  hubfly domains add <domain> [--wait]        (prints the TXT record to set)")
+	fmt.Println("  hubfly domains verify <domain> [--wait] | remove <domain> [--yes]")
+	fmt.Println("")
 	fmt.Println("Shortcuts:")
 	fmt.Println("  hubfly start <containerOrVmIdOrName>")
 	fmt.Println("  hubfly stop <containerOrVmIdOrName>")
@@ -406,4 +438,15 @@ func printUsage() {
 	fmt.Println("  hubfly config <validate|migrate|explain>")
 	fmt.Println("  hubfly update [--check]")
 	fmt.Println("  hubfly version")
+	fmt.Println("  hubfly doctor [--json]                      (connectivity, auth, clock and version checks)")
+	fmt.Println("")
+	fmt.Println("Global flags (before the command, e.g. hubfly --timeout 90s projects):")
+	fmt.Println("  --timeout <duration>   limit each API request (default 45s)")
+	fmt.Println("  --json-errors          print errors as JSON on stderr")
+	fmt.Println("  --no-retry             do not retry failed requests")
+	fmt.Println("  --debug                print HTTP requests and responses (secrets masked)")
+	fmt.Println("")
+	fmt.Println("Exit codes (container logs, stats, exec):")
+	fmt.Println("  8   container not running (stopped, sleeping or no runtime); start it first")
+	fmt.Println("  9   the container's region is temporarily unavailable; retry shortly")
 }
