@@ -506,53 +506,6 @@ func findContainer(token string, containerIDOrName string) (*container, string, 
 	return nil, "", fmt.Errorf("container '%s' not found in any project", containerIDOrName)
 }
 
-func logsFlow(containerIDOrName string, follow bool) error {
-	token, err := ensureAuth(true)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Searching for container '%s'...\n", containerIDOrName)
-	c, projectID, err := findContainer(token, containerIDOrName)
-	if err != nil {
-		return err
-	}
-
-	if follow {
-		fmt.Printf("Streaming logs for container %s (%s) [Ctrl+C to stop]...\n", c.Name, c.ID)
-		var lastStdout, lastStderr string
-		for {
-			logs, err := fetchContainerLogs(token, projectID, c.ID)
-			if err != nil {
-				return err
-			}
-			if len(logs.Stdout) > len(lastStdout) {
-				fmt.Print(logs.Stdout[len(lastStdout):])
-				lastStdout = logs.Stdout
-			}
-			if len(logs.Stderr) > len(lastStderr) {
-				fmt.Fprint(os.Stderr, logs.Stderr[len(lastStderr):])
-				lastStderr = logs.Stderr
-			}
-			time.Sleep(2 * time.Second)
-		}
-	} else {
-		logs, err := fetchContainerLogs(token, projectID, c.ID)
-		if err != nil {
-			return err
-		}
-		if logs.Stdout != "" {
-			fmt.Println("--- STDOUT ---")
-			fmt.Print(logs.Stdout)
-		}
-		if logs.Stderr != "" {
-			fmt.Println("--- STDERR ---")
-			fmt.Print(logs.Stderr)
-		}
-	}
-	return nil
-}
-
 func organizationsFlow() error {
 	token, err := ensureAuth(true)
 	if err != nil {
