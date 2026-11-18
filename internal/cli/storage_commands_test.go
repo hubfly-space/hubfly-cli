@@ -1,16 +1,24 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const stTestBase = "/api/v1/projects/st-1/storage"
@@ -688,5 +696,194 @@ func TestStorageDebugHidesSignedResponseURLs(t *testing.T) {
 	}
 	if !debugEnabled {
 		t.Fatal("debug state was not restored")
+	}
+}
+
+// flakyObjectServer serves body with Range support; the first response is
+// cut after cutAt bytes, and the first upload attempt answers 503.
+func flakyObjectServer(t *testing.T, body []byte, cutAt int, withETag bool) (*httptest.Server, *[]string) {
+	t.Helper()
+	var mu sync.Mutex
+	ranges := []string{}
+	served := 0
+	uploads := 0
+	sum := md5.Sum(body)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Method == http.MethodPut {
+			uploads++
+			data, _ := io.ReadAll(r.Body)
+			if uploads == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			got := md5.Sum(data)
+			w.Header().Set("ETag", `"`+hex.EncodeToString(got[:])+`"`)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprintf(w, `{"size":%d}`, len(data))
+			return
+		}
+		ranges = append(ranges, r.Header.Get("Range"))
+		if withETag {
+			w.Header().Set("ETag", `"`+hex.EncodeToString(sum[:])+`"`)
+		}
+		start := 0
+		if header := r.Header.Get("Range"); header != "" {
+			_, _ = fmt.Sscanf(header, "bytes=%d-", &start)
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(body)-1, len(body)))
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)-start))
+			w.WriteHeader(http.StatusPartialContent)
+		} else {
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		}
+		served++
+		if served == 1 && cutAt > 0 {
+			_, _ = w.Write(body[start:cutAt])
+			if hijacker, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hijacker.Hijack()
+				_ = conn.Close()
+			}
+			return
+		}
+		_, _ = w.Write(body[start:])
+	}))
+	t.Cleanup(server.Close)
+	return server, &ranges
+}
+
+func setupTransferTest(t *testing.T) *rtSyncBuffer {
+	t.Helper()
+	origDelay, origErr, origTerm := transferRetryDelay, rtErr, rtStderrIsTerminal
+	t.Cleanup(func() { transferRetryDelay, rtErr, rtStderrIsTerminal = origDelay, origErr, origTerm })
+	transferRetryDelay = func(int, http.Header) time.Duration { return time.Millisecond }
+	errOut := &rtSyncBuffer{}
+	rtErr = errOut
+	rtStderrIsTerminal = func() bool { return false }
+	return errOut
+}
+
+func TestTransferDownloadResumesAfterCut(t *testing.T) {
+	errOut := setupTransferTest(t)
+	body := bytes.Repeat([]byte("0123456789abcdef"), 4096)
+	server, ranges := flakyObjectServer(t, body, 10000, true)
+	dest := filepath.Join(t.TempDir(), "object.bin")
+	link := func(bool) (string, error) { return server.URL + "/signed/tok/download", nil }
+	written, err := storageDownloadFile(context.Background(), link, dest, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(dest)
+	if written != int64(len(body)) || !bytes.Equal(got, body) {
+		t.Fatalf("downloaded %d bytes, equal=%v", written, bytes.Equal(got, body))
+	}
+	if len(*ranges) != 2 || (*ranges)[1] != "bytes=10000-" {
+		t.Fatalf("ranges = %v", *ranges)
+	}
+	if _, err := os.Stat(transferPartialPath(dest)); !os.IsNotExist(err) {
+		t.Fatalf("partial file left behind: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "retrying") {
+		t.Fatalf("expected a retry notice, got %q", errOut.String())
+	}
+}
+
+func TestTransferDownloadResumesPartialFromEarlierRun(t *testing.T) {
+	setupTransferTest(t)
+	body := bytes.Repeat([]byte("hubfly"), 5000)
+	server, ranges := flakyObjectServer(t, body, 0, true)
+	dest := filepath.Join(t.TempDir(), "object.bin")
+	partial := transferPartialPath(dest)
+	if err := os.WriteFile(partial, body[:7000], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := md5.Sum(body)
+	meta := fmt.Sprintf(`{"total":%d,"etag":%q}`, len(body), hex.EncodeToString(sum[:]))
+	if err := os.WriteFile(partial+".json", []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := func(bool) (string, error) { return server.URL + "/signed/tok/download", nil }
+	if _, err := storageDownloadFile(context.Background(), link, dest, false, true); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(dest)
+	if !bytes.Equal(got, body) || len(*ranges) != 1 || (*ranges)[0] != "bytes=7000-" {
+		t.Fatalf("equal=%v ranges=%v", bytes.Equal(got, body), *ranges)
+	}
+}
+
+func TestTransferDownloadDetectsChecksumMismatch(t *testing.T) {
+	setupTransferTest(t)
+	body := bytes.Repeat([]byte("x"), 3000)
+	server, _ := flakyObjectServer(t, body, 0, true)
+	dest := filepath.Join(t.TempDir(), "object.bin")
+	partial := transferPartialPath(dest)
+	// A corrupt partial with matching metadata: the final MD5 must catch it.
+	_ = os.WriteFile(partial, bytes.Repeat([]byte("y"), 1000), 0o600)
+	sum := md5.Sum(body)
+	_ = os.WriteFile(partial+".json", []byte(fmt.Sprintf(`{"total":3000,"etag":%q}`, hex.EncodeToString(sum[:]))), 0o600)
+	link := func(bool) (string, error) { return server.URL + "/signed/tok/download", nil }
+	_, err := storageDownloadFile(context.Background(), link, dest, false, true)
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, statErr := os.Stat(partial); !os.IsNotExist(statErr) {
+		t.Fatal("corrupt partial should be removed")
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Fatal("destination must not be written")
+	}
+}
+
+func TestTransferDownloadToStdoutResumes(t *testing.T) {
+	setupTransferTest(t)
+	body := bytes.Repeat([]byte("abc"), 4000)
+	server, _ := flakyObjectServer(t, body, 5000, false)
+	var out bytes.Buffer
+	link := func(bool) (string, error) { return server.URL + "/signed/tok/download", nil }
+	if _, err := storageDownloadTo(context.Background(), link, &out, "Downloading", true); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out.Bytes(), body) {
+		t.Fatalf("stdout got %d bytes", out.Len())
+	}
+}
+
+func TestTransferUploadRetriesAndVerifies(t *testing.T) {
+	errOut := setupTransferTest(t)
+	body := bytes.Repeat([]byte("upload"), 2000)
+	server, _ := flakyObjectServer(t, body, 0, false)
+	local := filepath.Join(t.TempDir(), "file.bin")
+	_ = os.WriteFile(local, body, 0o600)
+	links := 0
+	link := func(refresh bool) (string, error) {
+		links++
+		return server.URL + "/upload/tok", nil
+	}
+	if err := storageUploadFile(context.Background(), link, local, "application/octet-stream", int64(len(body)), true); err != nil {
+		t.Fatal(err)
+	}
+	if links != 2 || !strings.Contains(errOut.String(), "503") {
+		t.Fatalf("links=%d notices=%q", links, errOut.String())
+	}
+}
+
+func TestTransferClassify(t *testing.T) {
+	cases := []struct {
+		err            error
+		retry, refresh bool
+	}{
+		{&transferHTTPError{Status: 403}, true, true},
+		{&transferHTTPError{Status: 503}, true, false},
+		{&transferHTTPError{Status: 404}, false, false},
+		{transferLocalError{errors.New("disk full")}, false, false},
+		{errTransferInterrupted, false, false},
+		{io.ErrUnexpectedEOF, true, false},
+	}
+	for _, c := range cases {
+		retry, refresh := transferClassify(c.err)
+		if retry != c.retry || refresh != c.refresh {
+			t.Fatalf("transferClassify(%v) = %v,%v", c.err, retry, refresh)
+		}
 	}
 }
