@@ -12,7 +12,7 @@ func execFlow(containerIDOrName string, command []string, timeout time.Duration)
 		return err
 	}
 
-	fmt.Printf("Searching for container '%s'...\n", containerIDOrName)
+	fmt.Fprintf(os.Stderr, "Searching for container '%s'...\n", containerIDOrName)
 	targetContainer, targetProjectID, err := findContainer(token, containerIDOrName)
 	if err != nil {
 		return err
@@ -35,7 +35,7 @@ func execContainerCommand(
 ) error {
 	result, err := execInContainer(token, projectID, containerID, command, timeout)
 	if err != nil {
-		return err
+		return friendlyContainerRuntimeError(err, displayName, "commands")
 	}
 
 	if result.Stdout != "" {
@@ -44,6 +44,26 @@ func execContainerCommand(
 	if result.Stderr != "" {
 		fmt.Fprint(os.Stderr, result.Stderr)
 	}
-	os.Exit(result.ExitCode)
-	return nil
+	return remoteExitStatus(result.ExitCode)
+}
+
+// remoteExitError carries the exit code of a remote command or shell so Run
+// returns it as the process exit code after deferred cleanup (terminal
+// restore, connection close) has run, instead of os.Exit skipping it.
+type remoteExitError struct{ code int }
+
+func (e *remoteExitError) Error() string {
+	return fmt.Sprintf("remote command exited with status %d", e.code)
+}
+func (e *remoteExitError) ExitCode() int { return e.code }
+
+// remoteExitStatus is nil for a zero exit code.
+func remoteExitStatus(code int) error {
+	if code == 0 {
+		return nil
+	}
+	if code < 0 || code > 255 {
+		code = 1
+	}
+	return &remoteExitError{code: code}
 }
