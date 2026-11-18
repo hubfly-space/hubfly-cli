@@ -31,7 +31,7 @@ Buckets and objects:
   hubfly storage buckets update <bucket> [--versioning <mode>] [--image-retention <duration>] [--project <p>]
   hubfly storage buckets delete <bucket> [--yes] [--project <p>]
   hubfly storage ls [<bucket>[/<prefix>]] [--recursive] [--search <text>] [--limit <n>] [--project <p>] [--json]
-  hubfly storage put <file|dir> <bucket>[/<key>] [--recursive] [--content-type <type>] [--project <p>]
+  hubfly storage put <file|dir> <bucket>[/<key>] [--recursive] [--jobs <n>] [--content-type <type>] [--project <p>]
   hubfly storage get <bucket>/<key> [<file>|-] [--force] [--project <p>]
   hubfly storage rm <bucket>/<key>... [--recursive] [--yes] [--project <p>]
   hubfly storage url <bucket>/<key> [--project <p>] [--json]
@@ -52,7 +52,12 @@ Assets and media:
 
 <project> is a Storage project id or name. It may be omitted when you have exactly one Storage
 project, or set HUBFLY_STORAGE_PROJECT. Object paths are <bucket>/<key>. An S3 secret is printed
-once, when the key is created.`
+once, when the key is created.
+
+Transfers retry failed attempts with backoff and verify what arrived (size, and the MD5 when the
+server reports one). An interrupted get keeps a hidden .<name>.hubfly-part file next to the
+destination: run the same command again to resume it. Uploads go in one request per file (up to
+20 GB); a failed upload is sent again whole.`
 
 // storageProjectEnv names the default Storage project for commands without
 // --project.
