@@ -124,7 +124,7 @@ func TestStatsAPIOperations(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{
 				"status": "running",
 				"metrics": map[string]any{
-					"cpuUsagePercent": 28.2,
+					"cpuUsagePercent":  28.2,
 					"memoryUsageBytes": 512 * 1024 * 1024,
 					"memoryTotalBytes": 2048 * 1024 * 1024,
 					"diskUsageBytes":   4 * 1024 * 1024 * 1024,
