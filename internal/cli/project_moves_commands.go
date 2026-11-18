@@ -19,12 +19,16 @@ import (
 
 const projectUsageText = `Region moves:
   hubfly project migrate <project> --region <id> [--mode cold|warm] [--at RFC3339] [--max-freeze 10m] [--wait] [--json]
-  hubfly project migration status|cancel|continue|move-back|dns|attestation <project> [--wait] [--json]
+  hubfly project migration status|watch|retry|cancel|continue|move-back|dns|attestation <project> [--wait] [--json]
   hubfly project rehome <project> --region <id> [--yes --confirm-name <name>] [--json]
 
 Projects:
-  hubfly project list [--org <id|slug>]
+  hubfly project list [--org <id|slug>] [--json]
+  hubfly project get <project> [--json]
   hubfly project history <project> [--json]
+
+Global projects (gpj_…) span every region: list and get show them; deploy a Cell to one region
+with hubfly deploy --project gpj_… --region <region>.
 
 Transfers (give a project to another HubFly account or organization):
   hubfly project transfer <project> --to <email> [--rotate-credentials] [--yes --confirm-name <name>] [--json]
@@ -53,11 +57,9 @@ func runProjectGroup(args []string) error {
 	command, rest := args[0], args[1:]
 	switch command {
 	case "list", "ls":
-		orgFilter, err := parseOrgFilter(rest)
-		if err != nil {
-			return errors.New("usage: hubfly project list [--org <id|slug>]")
-		}
-		return projectsFlow(orgFilter)
+		return projectListFlow(rest)
+	case "get", "show", "info":
+		return projectGetFlow(rest)
 	case "history":
 		return projectHistoryFlow(rest)
 	case "transfer":
@@ -71,7 +73,7 @@ func runProjectGroup(args []string) error {
 	case "rehome":
 		return projectMigrateFlow(rest, true)
 	default:
-		return fmt.Errorf("unknown project command %q (run: hubfly project help)", command)
+		return fmt.Errorf("unknown project command %q%s (run: hubfly project help)", command, didYouMean(command, []string{"list", "get", "history", "transfer", "transfers", "migrate", "migration", "rehome", "help"}))
 	}
 }
 
@@ -100,7 +102,7 @@ func runProjectTransfersGroup(args []string) error {
 		if strings.HasPrefix(command, "-") {
 			return projectTransfersListFlow(args)
 		}
-		return fmt.Errorf("unknown project transfers command %q (run: hubfly project help)", command)
+		return fmt.Errorf("unknown project transfers command %q%s (run: hubfly project help)", command, didYouMean(command, []string{"list", "status", "show", "accept", "decline", "cancel"}))
 	}
 }
 
