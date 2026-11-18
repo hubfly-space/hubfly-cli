@@ -20,6 +20,8 @@ import (
 
 	"github.com/hashicorp/yamux"
 	"golang.org/x/net/websocket"
+
+	"hubfly-cli/internal/version"
 )
 
 const tunnelDialTimeout = 10 * time.Second
@@ -232,6 +234,7 @@ func serveTunnelGateway(
 	if err != nil {
 		return fmt.Errorf("invalid tunnel connect url: %w", err)
 	}
+	wsConfig.Header.Set("User-Agent", version.UserAgent())
 
 	dialCtx, cancelDial := context.WithTimeout(ctx, tunnelDialTimeout)
 	defer cancelDial()
@@ -320,6 +323,12 @@ authenticated:
 		if err != nil {
 			return err
 		}
+	case <-session.CloseChan():
+		// The gateway connection dropped. Tunnel connect tokens are
+		// single-use, so say so instead of leaving a dead local listener.
+		_ = listener.Close()
+		wg.Wait()
+		return errors.New("tunnel connection to the gateway was lost; run the same hubfly tunnel command again to reconnect")
 	}
 
 	wg.Wait()
