@@ -11,6 +11,30 @@ import (
 
 func prompt(label string) (string, error) {
 	fmt.Print(label)
+	ctx := RootContext()
+	if ctx.Done() == nil {
+		return readPromptLine()
+	}
+	// Ctrl-C cancels the root context; stop waiting on stdin at once.
+	type promptResult struct {
+		line string
+		err  error
+	}
+	results := make(chan promptResult, 1)
+	go func() {
+		line, err := readPromptLine()
+		results <- promptResult{line: line, err: err}
+	}()
+	select {
+	case result := <-results:
+		return result.line, result.err
+	case <-ctx.Done():
+		fmt.Println()
+		return "", errors.New("cancelled")
+	}
+}
+
+func readPromptLine() (string, error) {
 	line, err := stdin.ReadString('\n')
 	if err != nil {
 		if errors.Is(err, io.EOF) {
