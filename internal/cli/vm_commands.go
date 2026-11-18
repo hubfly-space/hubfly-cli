@@ -76,7 +76,7 @@ func runVMGroup(args []string) error {
 		}
 		return vmPortUnmapFlow(rest[0])
 	default:
-		return fmt.Errorf("unknown vm command %q (available: list, inspect, start, stop, restart, force-stop, resize, delete, images, create, ports, port-map, port-unmap)", command)
+		return fmt.Errorf("unknown vm command %q (available: list, inspect, start, stop, restart, force-stop, resize, delete, images, create, ports, port-map, port-unmap)%s", command, didYouMean(command, []string{"list", "inspect", "start", "stop", "restart", "force-stop", "resize", "delete", "images", "create", "ports", "port-map", "port-unmap"}))
 	}
 }
 
