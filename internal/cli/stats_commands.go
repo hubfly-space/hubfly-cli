@@ -65,9 +65,14 @@ func runStatsCommand(args []string) error {
 	}
 
 	for {
-		err := renderStatsSnapshot(token, opts)
+		wait, err := renderStatsSnapshot(token, opts)
 		if err != nil {
-			return err
+			retryWait, retry := containerRuntimeRetryWait(err)
+			if !opts.stream || !retry {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "%s — retrying in %s...\n", err, retryWait.Round(time.Second))
+			wait = retryWait
 		}
 
 		if !opts.stream {
@@ -78,7 +83,7 @@ func runStatsCommand(args []string) error {
 		case <-ctx.Done():
 			fmt.Println("\nStopped monitoring.")
 			return nil
-		case <-time.After(2 * time.Second):
+		case <-time.After(wait):
 			// Clear screen for next tick
 			fmt.Print("\033[H\033[2J")
 		}
@@ -96,11 +101,18 @@ type statRow struct {
 	netStr      string
 }
 
-func renderStatsSnapshot(token string, opts statsOptions) error {
+// renderStatsSnapshot prints one table and returns how long a --stream loop
+// should wait before the next one: 2s, or a region's retryAfterSeconds when a
+// container's region is unavailable. With a single container target, a
+// runtime refusal (stopped, sleeping, region down, timeout) is returned as a
+// friendly error instead of a row of dashes.
+func renderStatsSnapshot(token string, opts statsOptions) (time.Duration, error) {
+	wait := 2 * time.Second
 	allProjects, err := fetchAllProjectsAnyType(token, "")
 	if err != nil {
-		return err
+		return wait, err
 	}
+	var targetErr error
 
 	var projects []project
 	for _, p := range allProjects {
@@ -133,6 +145,19 @@ func renderStatsSnapshot(token string, opts statsOptions) error {
 					}
 
 					metrics, mErr := fetchContainerMetrics(token, p.ID, c.ID)
+					if mErr != nil {
+						friendly := friendlyContainerRuntimeError(mErr, c.Name, "stats")
+						var runtimeErr *containerRuntimeError
+						if errors.As(friendly, &runtimeErr) {
+							row.status = containerRuntimeStatusLabel(runtimeErr, row.status)
+							if runtimeErr.retryAfter > wait {
+								wait = runtimeErr.retryAfter
+							}
+							if opts.target != "" && targetErr == nil {
+								targetErr = friendly
+							}
+						}
+					}
 					if mErr == nil && metrics != nil {
 						row.cpuStr = fmt.Sprintf("%.1f%%", metrics.CPUPercent)
 						if metrics.MemoryLimitBytes > 0 {
@@ -214,10 +239,13 @@ func renderStatsSnapshot(token string, opts statsOptions) error {
 
 	if len(rows) == 0 {
 		if opts.target != "" {
-			return fmt.Errorf("resource '%s' not found or has no active workloads", opts.target)
+			return wait, fmt.Errorf("resource '%s' not found or has no active workloads", opts.target)
 		}
 		fmt.Println("No active containers or virtual machines found.")
-		return nil
+		return wait, nil
+	}
+	if targetErr != nil && len(rows) == 1 {
+		return wait, targetErr
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
@@ -234,9 +262,27 @@ func renderStatsSnapshot(token string, opts statsOptions) error {
 			r.projectName,
 		)
 	}
-	return tw.Flush()
+	return wait, tw.Flush()
 }
 
+// containerRuntimeStatusLabel is the STATUS cell for a container whose stats
+// the region refused.
+func containerRuntimeStatusLabel(err *containerRuntimeError, fallback string) string {
+	switch err.code {
+	case containerNotRunning:
+		if apiErr := (*apiError)(nil); errors.As(err.err, &apiErr) && apiErrorDetail(apiErr, "reason") == containerRuntimeMissing {
+			return "no runtime"
+		}
+		return "stopped"
+	case containerSleeping:
+		return "sleeping"
+	case containerRegionDown:
+		return fmt.Sprintf("region unavailable (retry %s)", err.retryAfter.Round(time.Second))
+	case containerRuntimeTimeout:
+		return "timed out"
+	}
+	return fallback
+}
 
 func toFloat(val any) float64 {
 	switch v := val.(type) {
