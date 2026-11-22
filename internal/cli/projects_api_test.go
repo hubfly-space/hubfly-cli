@@ -2,9 +2,12 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -73,5 +76,54 @@ func TestCreateProjectForDeployUsesCurrentContract(t *testing.T) {
 	}
 	if created.Region.ID != "region-1" {
 		t.Fatalf("created project region = %#v", created.Region)
+	}
+}
+
+func TestFetchProjectsRequestsLargePagesAndKeepsOrder(t *testing.T) {
+	env := setupRealtimeTest(t)
+	const pageCount = 5
+	env.dash.on("GET", "/api/v1/projects", func(r rtRecorded) (int, any) {
+		page, _ := strconv.Atoi(r.Query.Get("page"))
+		return http.StatusOK, map[string]any{
+			"items": []map[string]any{
+				{"id": fmt.Sprintf("p-%d", page), "name": "cell", "type": "cell"},
+				{"id": fmt.Sprintf("b-%d", page), "name": "box", "type": "box"},
+			},
+			"page": page, "pageCount": pageCount,
+		}
+	})
+
+	projects, err := fetchProjectsWithOrg("token", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(projects))
+	for _, p := range projects {
+		got = append(got, p.ID)
+	}
+	if want := "p-1 p-2 p-3 p-4 p-5"; strings.Join(got, " ") != want {
+		t.Fatalf("projects = %v, want %s", got, want)
+	}
+	requests := env.dash.find("GET", "/api/v1/projects")
+	if len(requests) != pageCount {
+		t.Fatalf("requests = %d, want %d", len(requests), pageCount)
+	}
+	for _, r := range requests {
+		if r.Query.Get("pageSize") != strconv.Itoa(projectsPageSize) {
+			t.Fatalf("pageSize = %q, want %d", r.Query.Get("pageSize"), projectsPageSize)
+		}
+	}
+}
+
+func TestFetchProjectsFailsWhenAnyPageFails(t *testing.T) {
+	env := setupRealtimeTest(t)
+	env.dash.on("GET", "/api/v1/projects", func(r rtRecorded) (int, any) {
+		if r.Query.Get("page") == "3" {
+			return http.StatusBadRequest, map[string]any{"error": map[string]any{"code": "BAD", "message": "boom"}}
+		}
+		return http.StatusOK, map[string]any{"items": []any{}, "page": 1, "pageCount": 4}
+	})
+	if _, err := fetchProjectsWithOrg("token", ""); err == nil {
+		t.Fatal("expected an error when a page fails")
 	}
 }

@@ -362,13 +362,12 @@ func projectListFlow(args []string) error {
 	if err != nil {
 		return err
 	}
-	classic, err := fetchProjectsWithOrg(token, orgID)
+	classic, globals, err, globalsErr := fetchProjectsAndGlobals(token, orgID)
 	if err != nil {
 		return err
 	}
-	globals, err := fetchGlobalProjects(token, orgID)
-	if err != nil {
-		_, _ = fmt.Fprintf(rtErr, "Warning: could not list global projects: %v\n", err)
+	if globalsErr != nil {
+		_, _ = fmt.Fprintf(rtErr, "Warning: could not list global projects: %v\n", globalsErr)
 		globals = nil
 	}
 

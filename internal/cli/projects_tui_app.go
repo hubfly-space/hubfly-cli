@@ -170,6 +170,7 @@ func newProjectsApp(token string, orgID string) projectsApp {
 		input:             ti,
 		view:              viewProjects,
 		multiSelectedIdxs: map[int]bool{},
+		status:            "Loading projects...",
 	}
 }
 
@@ -190,6 +191,7 @@ func (m projectsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case projectsLoadedMsg:
 		if msg.err != nil {
 			m.errMsg = msg.err.Error()
+			m.status = "Failed to load projects"
 			return m, nil
 		}
 		m.projects = msg.projects
@@ -865,12 +867,11 @@ func (m *projectsApp) stopAllMulti() {
 
 func fetchProjectsCmd(token, orgID string) tea.Cmd {
 	return func() tea.Msg {
-		projects, err := fetchProjectsWithOrg(token, orgID)
+		// Global projects are extra: a failure leaves the classic list.
+		projects, globals, err, _ := fetchProjectsAndGlobals(token, orgID)
 		if err != nil {
 			return projectsLoadedMsg{err: err}
 		}
-		// Global projects are extra: a failure leaves the classic list.
-		globals, _ := fetchGlobalProjects(token, orgID)
 		return projectsLoadedMsg{projects: projects, globals: globals}
 	}
 }
