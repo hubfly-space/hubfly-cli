@@ -148,9 +148,16 @@ func containerListFlow(args []string) error {
 		}
 	}
 
-	projects, err := fetchProjectsFiltered(token, orgID, "cell")
+	// One project listing serves both the Cell list and the name lookup.
+	allProjects, err := fetchAllProjectsAnyType(token, orgID)
 	if err != nil {
 		return err
+	}
+	projects := make([]project, 0, len(allProjects))
+	for _, p := range allProjects {
+		if p.Type == "" || p.Type == "cell" {
+			projects = append(projects, p)
+		}
 	}
 
 	if opts.projectFilter != "" {
@@ -162,12 +169,9 @@ func containerListFlow(args []string) error {
 		}
 		if len(filtered) == 0 {
 			// Also check projects of any type in case it's not marked cell
-			allProjects, fetchErr := fetchAllProjectsAnyType(token, orgID)
-			if fetchErr == nil {
-				for _, p := range allProjects {
-					if p.ID == opts.projectFilter || strings.EqualFold(p.Name, opts.projectFilter) {
-						filtered = append(filtered, p)
-					}
+			for _, p := range allProjects {
+				if p.ID == opts.projectFilter || strings.EqualFold(p.Name, opts.projectFilter) {
+					filtered = append(filtered, p)
 				}
 			}
 		}
@@ -183,12 +187,15 @@ func containerListFlow(args []string) error {
 	}
 
 	var allContainers []containerRow
-	for _, p := range projects {
-		containers, err := fetchProjectContainers(token, p.ID)
-		if err != nil {
+	perProject, fetchErrs := fanOutProjects(projects, func(p project) ([]container, error) {
+		return fetchProjectContainers(token, p.ID)
+	})
+	for index, p := range projects {
+		if fetchErrs[index] != nil {
+			debugf("skipping project %s: %v", p.ID, fetchErrs[index])
 			continue
 		}
-		for _, c := range containers {
+		for _, c := range perProject[index] {
 			allContainers = append(allContainers, containerRow{
 				container:   c,
 				projectName: p.Name,
