@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"text/tabwriter"
 	"time"
 )
@@ -398,32 +397,6 @@ func storageRetention(seconds int64) string {
 	return formatRealtimeSeconds(int(seconds))
 }
 
-// storageParallel runs fn for indexes [0, count) on a few workers and returns
-// the errors by index.
-func storageParallel(count, workers int, fn func(index int) error) []error {
-	errs := make([]error, count)
-	if workers < 1 {
-		workers = 1
-	}
-	next := make(chan int)
-	var wg sync.WaitGroup
-	for worker := 0; worker < workers && worker < count; worker++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for index := range next {
-				errs[index] = fn(index)
-			}
-		}()
-	}
-	for index := 0; index < count; index++ {
-		next <- index
-	}
-	close(next)
-	wg.Wait()
-	return errs
-}
-
 // ---------------------------------------------------------------------------
 // list / create / info / usage / delete
 // ---------------------------------------------------------------------------
@@ -471,7 +444,7 @@ func storageListFlow(args []string) error {
 		return err
 	}
 	summaries := make([]storageProjectSummary, len(projects))
-	storageParallel(len(projects), 4, func(index int) error {
+	fanOut(len(projects), func(index int) error {
 		item := projects[index]
 		summary := storageProjectSummary{ID: item.ID, Name: item.Name, RegionID: item.Region.ID, RegionName: item.Region.Name}
 		overview, overviewErr := fetchStorageOverview(token, item.ID)
