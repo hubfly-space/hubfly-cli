@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/zalando/go-keyring"
 )
@@ -106,6 +108,43 @@ func deleteToken() error {
 	return nil
 }
 
+// renameReplaceTimeout bounds how long renameReplace retries on Windows.
+const renameReplaceTimeout = 2 * time.Second
+
+// renameReplace renames from onto to, replacing it. On Windows the replace
+// fails with "Access is denied" (or a sharing violation) while another writer
+// is replacing the same file or a reader/antivirus has it open, so retry
+// briefly there. Other platforms replace atomically and never contend.
+func renameReplace(from, to string) error {
+	err := os.Rename(from, to)
+	if runtime.GOOS != "windows" {
+		return err
+	}
+	deadline := time.Now().Add(renameReplaceTimeout)
+	delay := 5 * time.Millisecond
+	for err != nil && isWindowsFileContention(err) && time.Now().Before(deadline) {
+		time.Sleep(delay)
+		delay = min(delay*2, 100*time.Millisecond)
+		err = os.Rename(from, to)
+	}
+	return err
+}
+
+// isWindowsFileContention reports the transient errors a Windows replace
+// returns while the target is busy: ERROR_ACCESS_DENIED (5),
+// ERROR_SHARING_VIOLATION (32) and ERROR_LOCK_VIOLATION (33).
+func isWindowsFileContention(err error) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	switch errno {
+	case 5, 32, 33:
+		return true
+	}
+	return false
+}
+
 // WriteFileAtomic writes data to path so readers only ever see the old or the
 // new content: it writes a temp file in the same directory, fsyncs it, sets
 // perm, then renames it over path (MoveFileEx replace on Windows). The parent
@@ -139,7 +178,7 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := renameReplace(tmpPath, path); err != nil {
 		return err
 	}
 	committed = true
