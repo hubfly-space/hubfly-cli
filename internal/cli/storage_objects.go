@@ -508,7 +508,7 @@ func storagePutFlow(args []string) error {
 	}
 	_, _ = fmt.Fprintf(rtErr, "Uploading %d files (%s) to %s/%s\n", len(items), formatBytes(total), bucket, key)
 	var printMu sync.Mutex
-	errs := storageParallel(len(items), *jobs, func(index int) error {
+	errs := runPool(len(items), *jobs, func(index int) error {
 		item := items[index]
 		if ctx.Err() != nil {
 			return errTransferInterrupted
@@ -698,7 +698,7 @@ func storageRmFlow(args []string) error {
 	}
 	markers := 0
 	var printMu sync.Mutex
-	errs := storageParallel(len(targets), 4, func(index int) error {
+	errs := runPool(len(targets), 4, func(index int) error {
 		item := targets[index]
 		result, deleteErr := deleteStorageObject(target.token, target.project.ID, item.bucket, item.key)
 		printMu.Lock()
