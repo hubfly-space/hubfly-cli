@@ -3,10 +3,11 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -65,26 +66,32 @@ func fetchAllProjectsAnyType(token, orgID string) ([]project, error) {
 	return fetchProjectsFiltered(token, orgID, "")
 }
 
+// projectsPageSize is the largest page GET /api/v1/projects serves. Each
+// request costs roughly the same server time whatever its size, so fewer,
+// bigger pages are much faster than the default of 9.
+const projectsPageSize = 50
+
 func fetchProjectsFiltered(token, orgID, requiredType string) ([]project, error) {
 	fetchPage := func(page int) (projectsResponse, error) {
 		query := url.Values{}
-		query.Set("page", fmt.Sprintf("%d", page))
-		// The API caps the page size (50); the default is 9 per page.
-		query.Set("pageSize", "100")
+		query.Set("page", strconv.Itoa(page))
+		query.Set("pageSize", strconv.Itoa(projectsPageSize))
 		if orgID != "" {
 			query.Set("organizationId", orgID)
 		}
 		var payload projectsResponse
-		requestURL := apiHost + "/api/v1/projects?" + query.Encode()
-		err := doJSONRequest(http.MethodGet, requestURL, token, nil, &payload)
+		err := doJSONRequest(http.MethodGet, apiHost+"/api/v1/projects?"+query.Encode(), token, nil, &payload)
 		return payload, err
 	}
+
 	first, err := fetchPage(1)
 	if err != nil {
 		return nil, err
 	}
 	pages := []projectsResponse{first}
 	if first.PageCount > 1 {
+		// The page count is known after page 1: fetch the rest in parallel,
+		// keeping server order.
 		rest := make([]projectsResponse, first.PageCount-1)
 		errs := fanOut(len(rest), func(index int) error {
 			payload, pageErr := fetchPage(index + 2)
@@ -98,6 +105,7 @@ func fetchProjectsFiltered(token, orgID, requiredType string) ([]project, error)
 		}
 		pages = append(pages, rest...)
 	}
+
 	projects := make([]project, 0)
 	for _, payload := range pages {
 		for _, item := range payload.Projects {
@@ -108,6 +116,20 @@ func fetchProjectsFiltered(token, orgID, requiredType string) ([]project, error)
 		}
 	}
 	return projects, nil
+}
+
+// fetchProjectsAndGlobals loads classic and global projects concurrently.
+// globalsErr is reported separately: global projects are optional extras.
+func fetchProjectsAndGlobals(token, orgID string) (classic []project, globals []globalProjectSummary, err, globalsErr error) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		globals, globalsErr = fetchGlobalProjects(token, orgID)
+	}()
+	classic, err = fetchProjectsWithOrg(token, orgID)
+	wg.Wait()
+	return classic, globals, err, globalsErr
 }
 
 func normalizeProject(item project) project {
