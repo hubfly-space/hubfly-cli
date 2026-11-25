@@ -97,9 +97,8 @@ func volumeListFlow(args []string) error {
 		projects = append(projects, p)
 	}
 
-	var allVolumes []UnifiedVolume
-
-	for _, p := range projects {
+	perProject, _ := fanOutProjects(projects, func(p project) ([]UnifiedVolume, error) {
+		var allVolumes []UnifiedVolume
 		// 1. Box volumes
 		if p.Type == "" || p.Type == "box" {
 			boxVols, err := fetchProjectBoxVolumes(token, p.ID)
@@ -143,6 +142,11 @@ func volumeListFlow(args []string) error {
 				}
 			}
 		}
+		return allVolumes, nil
+	})
+	var allVolumes []UnifiedVolume
+	for _, volumes := range perProject {
+		allVolumes = append(allVolumes, volumes...)
 	}
 
 	if len(allVolumes) == 0 {
@@ -181,9 +185,13 @@ func findVolume(token, volumeIDOrName string) (*UnifiedVolume, error) {
 		return nil, err
 	}
 
-	// 1. Check box volumes first
-	for _, p := range allProjects {
-		boxVols, err := fetchProjectBoxVolumes(token, p.ID)
+	// 1. Check box volumes first (all projects asked concurrently; the first
+	// match in project order wins, as in a sequential search)
+	boxVolumes, boxErrs := fanOutProjects(allProjects, func(p project) ([]BoxVolume, error) {
+		return fetchProjectBoxVolumes(token, p.ID)
+	})
+	for index, p := range allProjects {
+		boxVols, err := boxVolumes[index], boxErrs[index]
 		if err == nil {
 			for _, bv := range boxVols {
 				if bv.ID == volumeIDOrName || bv.Name == volumeIDOrName || strings.EqualFold(bv.Name, volumeIDOrName) {
@@ -204,8 +212,11 @@ func findVolume(token, volumeIDOrName string) (*UnifiedVolume, error) {
 	}
 
 	// 2. Check cell volumes
-	for _, p := range allProjects {
-		details, err := fetchProject(token, p.ID)
+	projectDetailsList, detailErrs := fanOutProjects(allProjects, func(p project) (projectDetails, error) {
+		return fetchProject(token, p.ID)
+	})
+	for index, p := range allProjects {
+		details, err := projectDetailsList[index], detailErrs[index]
 		if err == nil {
 			for _, cv := range details.Volumes {
 				if cv.ID == volumeIDOrName || cv.Name == volumeIDOrName || strings.EqualFold(cv.Name, volumeIDOrName) {
