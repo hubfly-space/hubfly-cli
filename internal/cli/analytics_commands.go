@@ -174,7 +174,7 @@ func listAnalyticsSites(token, ref string) ([]analyticsSite, error) {
 		return nil, err
 	}
 	perProject := make([][]analyticsSite, len(projects))
-	errs := storageParallel(len(projects), 4, func(index int) error {
+	errs := fanOut(len(projects), func(index int) error {
 		item := projects[index]
 		overview, fetchErr := fetchAnalyticsOverview(token, item.ID)
 		if fetchErr != nil {
@@ -782,7 +782,7 @@ func analyticsSitesEnableFlow(args []string) error {
 		route   analyticsServedRoute
 	}
 	found := make([][]match, len(projects))
-	errs := storageParallel(len(projects), 4, func(index int) error {
+	errs := fanOut(len(projects), func(index int) error {
 		if projects[index].Type == "analytics" {
 			return nil
 		}
