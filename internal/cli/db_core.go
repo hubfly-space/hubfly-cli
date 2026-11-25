@@ -54,8 +54,11 @@ func listDBInstances(token, projectRef string) ([]mlInstance, error) {
 		return nil, err
 	}
 	result := []mlInstance{}
-	for _, item := range projects {
-		instances, listErr := fetchManagedInstancesDetailed(token, item.ID)
+	perProject, fetchErrs := fanOutProjects(projects, func(item project) ([]mlInstance, error) {
+		return fetchManagedInstancesDetailed(token, item.ID)
+	})
+	for index, item := range projects {
+		instances, listErr := perProject[index], fetchErrs[index]
 		if listErr != nil {
 			if projectRef != "" {
 				return nil, listErr
