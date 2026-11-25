@@ -86,36 +86,30 @@ func findBox(token, boxIDOrName string) (*Box, string, error) {
 		return nil, "", err
 	}
 
-	// Prioritize box projects
+	// Prioritize box projects, then check every other project type. Each
+	// pass asks its projects concurrently; the first match in project order
+	// wins, as in a sequential search.
+	var boxProjects, otherProjects []project
 	for _, p := range allProjects {
-		if p.Type != "" && p.Type != "box" {
-			continue
-		}
-		boxes, err := fetchProjectBoxes(token, p.ID)
-		if err != nil {
-			continue
-		}
-		for _, b := range boxes {
-			if b.ID == boxIDOrName || b.Name == boxIDOrName || strings.EqualFold(b.Name, boxIDOrName) {
-				b.ProjectName = p.Name
-				return &b, p.ID, nil
-			}
+		if p.Type == "" || p.Type == "box" {
+			boxProjects = append(boxProjects, p)
+		} else {
+			otherProjects = append(otherProjects, p)
 		}
 	}
-
-	// Secondary check across any project type
-	for _, p := range allProjects {
-		if p.Type == "box" {
-			continue
-		}
-		boxes, err := fetchProjectBoxes(token, p.ID)
-		if err != nil {
-			continue
-		}
-		for _, b := range boxes {
-			if b.ID == boxIDOrName || b.Name == boxIDOrName || strings.EqualFold(b.Name, boxIDOrName) {
-				b.ProjectName = p.Name
-				return &b, p.ID, nil
+	for _, pass := range [][]project{boxProjects, otherProjects} {
+		perProject, fetchErrs := fanOutProjects(pass, func(p project) ([]Box, error) {
+			return fetchProjectBoxes(token, p.ID)
+		})
+		for index, p := range pass {
+			if fetchErrs[index] != nil {
+				continue
+			}
+			for _, b := range perProject[index] {
+				if b.ID == boxIDOrName || b.Name == boxIDOrName || strings.EqualFold(b.Name, boxIDOrName) {
+					b.ProjectName = p.Name
+					return &b, p.ID, nil
+				}
 			}
 		}
 	}
@@ -211,12 +205,15 @@ func vmListFlow(args []string) error {
 	}
 
 	var allBoxes []boxRow
-	for _, p := range boxProjects {
-		boxes, err := fetchProjectBoxes(token, p.ID)
-		if err != nil {
+	perProject, fetchErrs := fanOutProjects(boxProjects, func(p project) ([]Box, error) {
+		return fetchProjectBoxes(token, p.ID)
+	})
+	for index, p := range boxProjects {
+		if fetchErrs[index] != nil {
+			debugf("skipping project %s: %v", p.ID, fetchErrs[index])
 			continue
 		}
-		for _, b := range boxes {
+		for _, b := range perProject[index] {
 			allBoxes = append(allBoxes, boxRow{
 				Box:         b,
 				projectName: p.Name,
@@ -731,10 +728,12 @@ func vmPortUnmapFlow(mappingID string) error {
 	}
 
 	foundProjectID := ""
-	for _, p := range allProjects {
-		mappings, err := fetchBoxPortMappings(token, p.ID)
-		if err == nil {
-			for _, m := range mappings {
+	perProject, fetchErrs := fanOutProjects(allProjects, func(p project) ([]BoxPortMapping, error) {
+		return fetchBoxPortMappings(token, p.ID)
+	})
+	for index, p := range allProjects {
+		if fetchErrs[index] == nil {
+			for _, m := range perProject[index] {
 				if m.ID == mappingID {
 					foundProjectID = p.ID
 					break
