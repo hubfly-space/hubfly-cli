@@ -122,9 +122,15 @@ func renderStatsSnapshot(token string, opts statsOptions) (time.Duration, error)
 		projects = append(projects, p)
 	}
 
-	var rows []statRow
-
-	for _, p := range projects {
+	type projectStats struct {
+		rows      []statRow
+		wait      time.Duration
+		targetErr error
+	}
+	perProject, _ := fanOutProjects(projects, func(p project) (projectStats, error) {
+		var rows []statRow
+		wait := time.Duration(0)
+		var targetErr error
 		// Collect containers
 		if p.Type == "" || p.Type == "cell" {
 			containers, cErr := fetchProjectContainers(token, p.ID)
@@ -234,6 +240,18 @@ func renderStatsSnapshot(token string, opts statsOptions) (time.Duration, error)
 					rows = append(rows, row)
 				}
 			}
+		}
+		return projectStats{rows: rows, wait: wait, targetErr: targetErr}, nil
+	})
+
+	var rows []statRow
+	for _, stats := range perProject {
+		rows = append(rows, stats.rows...)
+		if stats.wait > wait {
+			wait = stats.wait
+		}
+		if targetErr == nil {
+			targetErr = stats.targetErr
 		}
 	}
 
