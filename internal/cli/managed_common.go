@@ -47,8 +47,11 @@ func listManagedInstancesOf(token, projectRef, service string) ([]rtInstance, er
 		return nil, err
 	}
 	result := []rtInstance{}
-	for _, item := range projects {
-		instances, listErr := fetchManagedInstances(token, item.ID)
+	perProject, fetchErrs := fanOutProjects(projects, func(item project) ([]rtInstance, error) {
+		return fetchManagedInstances(token, item.ID)
+	})
+	for index, item := range projects {
+		instances, listErr := perProject[index], fetchErrs[index]
 		if listErr != nil {
 			if projectRef != "" {
 				return nil, listErr
