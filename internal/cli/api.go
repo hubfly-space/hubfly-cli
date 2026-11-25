@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -65,26 +66,45 @@ func fetchAllProjectsAnyType(token, orgID string) ([]project, error) {
 }
 
 func fetchProjectsFiltered(token, orgID, requiredType string) ([]project, error) {
-	projects := make([]project, 0)
-	for page := 1; ; page++ {
+	fetchPage := func(page int) (projectsResponse, error) {
 		query := url.Values{}
 		query.Set("page", fmt.Sprintf("%d", page))
+		// The API caps the page size (50); the default is 9 per page.
+		query.Set("pageSize", "100")
 		if orgID != "" {
 			query.Set("organizationId", orgID)
 		}
 		var payload projectsResponse
 		requestURL := apiHost + "/api/v1/projects?" + query.Encode()
-		if err := doJSONRequest(http.MethodGet, requestURL, token, nil, &payload); err != nil {
-			return nil, err
+		err := doJSONRequest(http.MethodGet, requestURL, token, nil, &payload)
+		return payload, err
+	}
+	first, err := fetchPage(1)
+	if err != nil {
+		return nil, err
+	}
+	pages := []projectsResponse{first}
+	if first.PageCount > 1 {
+		rest := make([]projectsResponse, first.PageCount-1)
+		errs := fanOut(len(rest), func(index int) error {
+			payload, pageErr := fetchPage(index + 2)
+			rest[index] = payload
+			return pageErr
+		})
+		for _, pageErr := range errs {
+			if pageErr != nil {
+				return nil, pageErr
+			}
 		}
+		pages = append(pages, rest...)
+	}
+	projects := make([]project, 0)
+	for _, payload := range pages {
 		for _, item := range payload.Projects {
 			if requiredType != "" && item.Type != "" && item.Type != requiredType {
 				continue
 			}
 			projects = append(projects, normalizeProject(item))
-		}
-		if payload.PageCount <= page || payload.PageCount == 0 {
-			break
 		}
 	}
 	return projects, nil
@@ -197,39 +217,51 @@ func fetchContainerDetails(token, projectID, containerID string) (*ContainerDeta
 	return &res, nil
 }
 
+// fetchWrappedList GETs a list endpoint once and accepts a bare array or an
+// object holding the list under one of keys. found is false when the answer
+// is an object with none of the keys.
+func fetchWrappedList[T any](token, requestURL string, keys ...string) (items []T, found bool, err error) {
+	var raw json.RawMessage
+	if err := doJSONRequest(http.MethodGet, requestURL, token, nil, &raw); err != nil {
+		return nil, false, err
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, false, nil
+	}
+	if trimmed[0] == '[' {
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return nil, false, err
+		}
+		return items, true, nil
+	}
+	var wrapped map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &wrapped); err != nil {
+		return nil, false, err
+	}
+	for _, key := range keys {
+		value, ok := wrapped[key]
+		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			continue
+		}
+		var list []T
+		if err := json.Unmarshal(value, &list); err != nil {
+			return nil, false, err
+		}
+		if !found || len(list) > 0 {
+			items, found = list, true
+		}
+		if len(items) > 0 {
+			break
+		}
+	}
+	return items, found, nil
+}
+
 func fetchProjectContainers(token, projectID string) ([]container, error) {
-	var payload struct {
-		Summary struct {
-			Total   int `json:"total"`
-			Running int `json:"running"`
-		} `json:"summary"`
-		Items      []container `json:"items"`
-		Containers []container `json:"containers"`
-	}
-	err := doJSONRequest(
-		http.MethodGet,
-		apiHost+"/api/v1/projects/"+projectID+"/containers",
-		token,
-		nil,
-		&payload,
-	)
-	if err == nil {
-		if len(payload.Items) > 0 {
-			return payload.Items, nil
-		}
-		if len(payload.Containers) > 0 {
-			return payload.Containers, nil
-		}
-	}
-	var rawList []container
-	if listErr := doJSONRequest(
-		http.MethodGet,
-		apiHost+"/api/v1/projects/"+projectID+"/containers",
-		token,
-		nil,
-		&rawList,
-	); listErr == nil && len(rawList) > 0 {
-		return rawList, nil
+	items, found, err := fetchWrappedList[container](token, apiHost+"/api/v1/projects/"+projectID+"/containers", "items", "containers")
+	if err == nil && found {
+		return items, nil
 	}
 	// Fallback to fetchProject which embeds the containers list
 	details, err := fetchProject(token, projectID)
@@ -240,34 +272,9 @@ func fetchProjectContainers(token, projectID string) ([]container, error) {
 }
 
 func fetchProjectBoxes(token, projectID string) ([]Box, error) {
-	var payload []Box
-	err := doJSONRequest(
-		http.MethodGet,
-		apiHost+"/api/v1/projects/"+projectID+"/boxes",
-		token,
-		nil,
-		&payload,
-	)
+	payload, _, err := fetchWrappedList[Box](token, apiHost+"/api/v1/projects/"+projectID+"/boxes", "boxes", "items")
 	if err != nil {
-		var wrapped struct {
-			Boxes []Box `json:"boxes"`
-			Items []Box `json:"items"`
-		}
-		if wrapErr := doJSONRequest(
-			http.MethodGet,
-			apiHost+"/api/v1/projects/"+projectID+"/boxes",
-			token,
-			nil,
-			&wrapped,
-		); wrapErr == nil {
-			if len(wrapped.Boxes) > 0 {
-				payload = wrapped.Boxes
-			} else {
-				payload = wrapped.Items
-			}
-		} else {
-			return nil, err
-		}
+		return nil, err
 	}
 	for i := range payload {
 		payload[i].ProjectID = projectID
@@ -524,34 +531,9 @@ func updateProjectEnv(token, projectID string, vars []ProjectEnvVar) (*ProjectEn
 }
 
 func fetchProjectBoxVolumes(token, projectID string) ([]BoxVolume, error) {
-	var payload []BoxVolume
-	err := doJSONRequest(
-		http.MethodGet,
-		apiHost+"/api/v1/projects/"+projectID+"/box-volumes",
-		token,
-		nil,
-		&payload,
-	)
+	payload, _, err := fetchWrappedList[BoxVolume](token, apiHost+"/api/v1/projects/"+projectID+"/box-volumes", "volumes", "items")
 	if err != nil {
-		var wrapped struct {
-			Volumes []BoxVolume `json:"volumes"`
-			Items   []BoxVolume `json:"items"`
-		}
-		if wrapErr := doJSONRequest(
-			http.MethodGet,
-			apiHost+"/api/v1/projects/"+projectID+"/box-volumes",
-			token,
-			nil,
-			&wrapped,
-		); wrapErr == nil {
-			if len(wrapped.Volumes) > 0 {
-				payload = wrapped.Volumes
-			} else {
-				payload = wrapped.Items
-			}
-		} else {
-			return nil, err
-		}
+		return nil, err
 	}
 	for i := range payload {
 		payload[i].ProjectID = projectID
@@ -609,34 +591,9 @@ func mutateProjectBoxVolume(token, projectID, volumeID, action string, extra map
 }
 
 func fetchBoxPortMappings(token, projectID string) ([]BoxPortMapping, error) {
-	var payload []BoxPortMapping
-	err := doJSONRequest(
-		http.MethodGet,
-		apiHost+"/api/v1/projects/"+projectID+"/box-port-mappings",
-		token,
-		nil,
-		&payload,
-	)
+	payload, _, err := fetchWrappedList[BoxPortMapping](token, apiHost+"/api/v1/projects/"+projectID+"/box-port-mappings", "portMappings", "items")
 	if err != nil {
-		var wrapped struct {
-			PortMappings []BoxPortMapping `json:"portMappings"`
-			Items        []BoxPortMapping `json:"items"`
-		}
-		if wrapErr := doJSONRequest(
-			http.MethodGet,
-			apiHost+"/api/v1/projects/"+projectID+"/box-port-mappings",
-			token,
-			nil,
-			&wrapped,
-		); wrapErr == nil {
-			if len(wrapped.PortMappings) > 0 {
-				payload = wrapped.PortMappings
-			} else {
-				payload = wrapped.Items
-			}
-		} else {
-			return nil, err
-		}
+		return nil, err
 	}
 	for i := range payload {
 		payload[i].ProjectID = projectID
